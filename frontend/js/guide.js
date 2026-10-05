@@ -134,7 +134,7 @@ export class Guide {
       this.spot(["view", "subsPanel"]);
       this.render(`<div class="step"><span>1 / 6 · MIRROR</span></div>
         <h2>This is a live digital twin of a Moon rover</h2>
-        <p>A simulated rover is driving near the lunar south pole and sending telemetry through a relay orbiter, about 2.6 seconds late. Everything you see, the 3D rover, the health cards and the charts, comes from that telemetry stream.</p>
+        <p>A simulated rover is driving near the lunar south pole and sending telemetry through a relay orbiter, about 2.6 seconds late. Everything you see, the 3D rover, the health tiles and the charts, comes from that telemetry stream.</p>
         <div class="row"><button class="cta" data-a="next">NEXT</button></div>`);
     } else if (step === "sync") {
       this.spot(["syncPill", "chartsPanel"]);
@@ -190,7 +190,7 @@ export class Guide {
     const ready = this.readyAt != null;
     this.render(`<div class="step"><span>4 / 6 · CASCADE</span><span>${STORY[this.kind].icon} ${STORY[this.kind].name}</span></div>
       <h2>Watch the fault spread</h2>
-      <p>The arrows in the propagation graph light up as one subsystem pushes on another. Each one is an equation in the model, not an animation.</p>
+      <p>The arrows in the "How it spreads" graph light up as one subsystem pushes on another. Each one is an equation in the model, not an animation.</p>
       <ul class="narr">${this.narr.slice(-6).map((n) => `<li class="${n.c}">${esc(n.t)}</li>`).join("") || "<li>Fault injected. Waiting for the effects to show up…</li>"}</ul>
       <div class="row">${ready ? `<button class="cta" data-a="next">SEE THE PREDICTION</button>` : `<span class="note">Running at 60× speed…</span>`}</div>`);
   }

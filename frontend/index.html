@@ -55,7 +55,7 @@
       <button data-v="pause" title="Pause / resume">II</button>
       <button data-v="1">1×</button><button data-v="10">10×</button><button data-v="30">30×</button><button data-v="60">60×</button><button data-v="120">120×</button>
     </div>
-    <label class="toggle" title="Overlay the hidden ground truth of the simulated rover, to check the twin's accuracy"><input type="checkbox" id="truth"> Truth (test harness)</label>
+    <label class="toggle" title="Overlay the hidden ground truth of the simulated rover, to check the twin's accuracy"><input type="checkbox" id="truth"> Show truth</label>
     <button class="tbtn hot" id="guideBtn">Guided demo</button>
     <button class="tbtn" id="resetBtn">Reset</button>
     <a class="tbtn" href="/docs" target="_blank" rel="noopener">API</a>
@@ -63,19 +63,19 @@
 
   <main class="grid">
     <aside class="col left">
-      <div class="panel" id="subsPanel"><h3>SUBSYSTEM HEALTH <small>as the twin sees it</small></h3><div id="subs"></div></div>
-      <div class="panel" id="diagPanel"><h3>DIAGNOSIS <small>root causes</small></h3><div id="diag"></div></div>
-      <div class="panel" id="residPanel"><h3>MODEL RESIDUALS <small>telemetry vs twin</small></h3><div id="resid"></div><div id="estimates"></div></div>
+      <div class="panel" id="subsPanel"><h3>HEALTH <small>as the twin sees it</small></h3><div id="subs" class="subs-grid"></div></div>
+      <div class="panel" id="diagPanel"><h3>WHAT'S WRONG <small>found by the twin</small></h3><div id="diag"></div></div>
     </aside>
 
     <section class="col center">
       <div class="panel view" id="view">
         <div class="view-overlay" id="viewChips"></div>
-        <div class="view-legend" id="viewLegend">Drag to orbit · scroll to zoom</div>
+        <div class="ticker" id="ticker"></div>
+        <div class="view-legend">Drag to orbit · scroll to zoom</div>
       </div>
       <div class="row2">
-        <div class="panel" id="cascadePanel"><h3>FAULT PROPAGATION <small>live coupling strength from the model</small></h3><svg id="cascade" viewBox="0 0 520 200" preserveAspectRatio="xMidYMid meet"></svg></div>
-        <div class="panel" id="impactPanel"><h3>PREDICTED IMPACT <small>next 2 h if nothing is done</small></h3><div id="impact"></div></div>
+        <div class="panel" id="cascadePanel"><h3>HOW IT SPREADS <small>live, from the model</small></h3><svg id="cascade" viewBox="0 0 520 200" preserveAspectRatio="xMidYMid meet"></svg></div>
+        <div class="panel" id="impactPanel"><h3>WHAT HAPPENS NEXT <small>2 h forecast if nothing is done</small></h3><div id="impact"></div></div>
       </div>
       <div class="panel charts" id="chartsPanel">
         <div class="charts-grid">
@@ -84,17 +84,30 @@
           <div class="chart"><canvas id="ch-t_av"></canvas></div>
           <div class="chart"><canvas id="ch-margin"></canvas></div>
         </div>
+        <div class="chart-legend" id="chartLegend"></div>
       </div>
     </section>
 
     <aside class="col right">
-      <div class="panel" id="faultPanel"><h3>INJECT FAULT <small>test harness</small></h3>
-        <div class="ramp">Onset <select id="ramp"><option value="0">instant</option><option value="60" selected>ramp 1 min</option><option value="600">ramp 10 min</option></select></div>
-        <div id="faults"></div><div class="active-f" id="activeFaults"></div>
+      <div class="panel" id="faultPanel"><h3>BREAK SOMETHING <small>test harness</small></h3>
+        <div id="faults" class="fault-grid"></div>
+        <div class="fault-opts">
+          <label>Severity <input type="range" id="sev" min="0.2" max="1" step="0.05" value="0.85"> <span class="num" id="sevTxt">85%</span></label>
+          <select id="ramp" aria-label="Onset"><option value="0">instant</option><option value="60" selected>over 1 min</option><option value="600">over 10 min</option></select>
+        </div>
+        <div class="active-f" id="activeFaults"></div>
       </div>
-      <div class="panel" id="plansPanel"><h3>RECOVERY OPTIONS <small>simulated 2 h ahead, ranked</small></h3><div id="plans"></div></div>
-      <div class="panel" id="cmdPanel"><h3>COMMANDS <small>via relay uplink</small></h3><div id="cmds"></div><div class="pending" id="pending"></div></div>
-      <div class="panel log" id="logPanel"><h3>MISSION LOG</h3><div id="log"></div></div>
+      <div class="panel" id="plansPanel"><h3>HOW TO FIX IT <small>each option simulated 2 h ahead</small></h3><div id="plans"></div><button class="more hidden" id="morePlans"></button></div>
+      <div class="panel tabs" id="morePanel">
+        <div class="tabbar" role="tablist">
+          <button role="tab" data-tab="logPanel" class="on">Log</button>
+          <button role="tab" data-tab="cmdPanel">Commands</button>
+          <button role="tab" data-tab="residPanel">Model check <i class="tdot hidden" id="modelDot"></i></button>
+        </div>
+        <div class="tab-pane on" id="logPanel"><div id="log"></div></div>
+        <div class="tab-pane" id="cmdPanel"><div id="cmds"></div><div class="pending" id="pending"></div></div>
+        <div class="tab-pane" id="residPanel"><div id="resid"></div><div id="estimates"></div></div>
+      </div>
     </aside>
   </main>
   <div id="coach" class="coach hidden" role="dialog" aria-live="polite"></div>
