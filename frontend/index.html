@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>RoverTwin · Mission Digital Twin for Predictive Fault Simulation</title>
-<meta name="description" content="A live digital twin of a lunar rover: telemetry sync, fault injection, cascading-failure propagation, prediction and recovery simulation.">
+<meta name="description" content="A telemetry-synchronised digital twin of a lunar rover — not a dashboard. Fault injection, cascading-failure propagation, prediction and recovery simulation.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;800&family=Rajdhani:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/style.css">
@@ -28,16 +28,16 @@
     <div class="hero">
       <div class="tag">TECHFEST 2026–27 · ST-09 · Mission Digital Twin for Predictive Fault Simulation</div>
       <h1>ROVER<br>TWIN</h1>
-      <p class="lead">A live digital twin of a Moon rover. It stays in sync with the telemetry stream, lets you break the rover on purpose, shows how one fault spreads through power, heat, navigation and radio, predicts what happens next and simulates the way out.</p>
+      <p class="lead">A <b>telemetry-synchronised digital twin</b> of a Moon rover — not a dashboard of canned plots. It runs the same physics as the rover, corrects itself with every delayed radio frame, lets you inject faults, shows how they cascade, and ranks recovery plans before a command is sent.</p>
       <ul class="how">
-        <li><b>MIRROR</b>The twin runs the rover's physics and corrects itself with every telemetry frame.</li>
-        <li><b>BREAK</b>Inject battery, thermal, sensor or communication faults, alone or together.</li>
-        <li><b>PREDICT</b>It spots what the model can't explain, finds the root cause and projects 2 hours ahead.</li>
-        <li><b>RECOVER</b>Every recovery option is simulated and ranked before a command is sent.</li>
+        <li><b>MIRROR</b>Same physics model as the rover; corrected by telemetry.</li>
+        <li><b>BREAK</b>Battery, thermal, sensor or radio faults, alone or together.</li>
+        <li><b>PREDICT</b>Root cause + 2-hour forecast with ensemble bands.</li>
+        <li><b>RECOVER</b>Every option simulated and scored before uplink.</li>
       </ul>
       <div class="ctas">
-        <button class="cta" id="goConsole">OPEN MISSION CONTROL</button>
-        <button class="cta alt" id="goGuide">GUIDED DEMO · 3 MIN</button>
+        <button class="cta" id="goGuide">GUIDED DEMO · 3 MIN</button>
+        <button class="cta alt" id="goConsole">OPEN MISSION CONTROL</button>
       </div>
       <div class="conn off" id="conn">Ground segment: <b>connecting…</b></div>
     </div>
@@ -48,14 +48,15 @@
   <header class="topbar">
     <button class="brand" id="home" title="Back to start"><i></i>ROVERTWIN</button>
     <span class="met" id="met">MET 00:00:00</span>
-    <span class="pill" id="syncPill"><span class="dot"></span><span id="syncTxt">INIT</span><small id="syncSub"></small></span>
+    <span class="pill" id="syncPill" title="Twin sync to telemetry (not a live plant read)"><span class="dot"></span><span id="syncTxt">INIT</span><small id="syncSub"></small></span>
     <span class="pill" id="modePill"><span class="dot"></span><span id="modeTxt">NOMINAL</span></span>
     <span class="spacer"></span>
     <div class="seg" id="speed" aria-label="Simulation speed">
       <button data-v="pause" title="Pause / resume">II</button>
       <button data-v="1">1×</button><button data-v="10">10×</button><button data-v="30">30×</button><button data-v="60">60×</button><button data-v="120">120×</button>
     </div>
-    <label class="toggle" title="Overlay the hidden ground truth of the simulated rover, to check the twin's accuracy"><input type="checkbox" id="truth"> Show truth</label>
+    <label class="toggle" title="Pause the sim once when the twin first predicts a hard limit violation"><input type="checkbox" id="pauseCrit" checked> Pause on critical</label>
+    <label class="toggle" title="Test harness only: overlay the hidden plant state. The twin never sees this."><input type="checkbox" id="truth"> Show truth (test harness)</label>
     <button class="tbtn hot" id="guideBtn">Guided demo</button>
     <button class="tbtn" id="resetBtn">Reset</button>
     <a class="tbtn" href="/docs" target="_blank" rel="noopener">API</a>
@@ -68,14 +69,18 @@
     </aside>
 
     <section class="col center">
+      <div class="row2">
+        <div class="panel" id="cascadePanel">
+          <h3>HOW IT SPREADS <small>live, from the model</small></h3>
+          <svg id="cascade" viewBox="0 0 520 200" preserveAspectRatio="xMidYMid meet"></svg>
+          <div class="cascade-cap">Edges = live equations from the model · hover an arrow for the formula</div>
+        </div>
+        <div class="panel" id="impactPanel"><h3>WHAT HAPPENS NEXT <small>2 h forecast if nothing is done</small></h3><div id="impact"></div></div>
+      </div>
       <div class="panel view" id="view">
         <div class="view-overlay" id="viewChips"></div>
         <div class="ticker" id="ticker"></div>
         <div class="view-legend">Drag to orbit · scroll to zoom</div>
-      </div>
-      <div class="row2">
-        <div class="panel" id="cascadePanel"><h3>HOW IT SPREADS <small>live, from the model</small></h3><svg id="cascade" viewBox="0 0 520 200" preserveAspectRatio="xMidYMid meet"></svg></div>
-        <div class="panel" id="impactPanel"><h3>WHAT HAPPENS NEXT <small>2 h forecast if nothing is done</small></h3><div id="impact"></div></div>
       </div>
       <div class="panel charts" id="chartsPanel">
         <div class="charts-grid">

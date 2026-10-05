@@ -4,9 +4,11 @@ import { Cascade } from "./cascade.js";
 import { Guide } from "./guide.js";
 
 const $ = (id) => document.getElementById(id);
-export const S = { meta: null, snap: null, history: [], events: [], pred: null, truth: false, preview: null, connected: false, allPlans: false };
+export const S = { meta: null, snap: null, history: [], events: [], pred: null, truth: false, preview: null, connected: false, allPlans: false, pauseOnCritical: true };
 export const bus = new EventTarget();
 const emit = (type, detail) => bus.dispatchEvent(new CustomEvent(type, { detail }));
+let lastAnoms = "";
+let pausedCritKey = null;
 
 const ICON = { battery: "🔋", thermal: "🌡️", sensor: "🧭", comms: "📡" };
 const SHORT_FAULT = { battery: "Battery", thermal: "Overheat", sensor: "Sensor", comms: "Radio" };
@@ -47,8 +49,28 @@ export function send(op, data = {}) {
 function setConn(on) {
   S.connected = on;
   const c = $("conn");
-  c.classList.toggle("off", !on);
-  c.innerHTML = `Ground segment: <b>${on ? "connected" : "offline, start the server (see README)"}</b>`;
+  if (c) {
+    c.classList.toggle("off", !on);
+    c.innerHTML = `Ground segment: <b>${on ? "connected" : "offline — start the server (see README)"}</b>`;
+  }
+  applyGroundGate();
+  if (!on && $("syncPill")) {
+    $("syncPill").className = "pill offline";
+    $("syncTxt").textContent = "GROUND OFFLINE";
+    $("syncSub").textContent = "reconnect WebSocket";
+  }
+}
+
+function applyGroundGate() {
+  const off = !S.connected;
+  const tip = off ? "Ground segment offline — start uvicorn (see README)" : "";
+  for (const b of document.querySelectorAll("#faults .fbtn, #plans .pbtn.go, #cmds button, #activeFaults [data-clear]")) {
+    b.disabled = off;
+    if (off) b.title = tip;
+    else if (b.dataset.kind && S.meta?.faults?.[b.dataset.kind]) b.title = S.meta.faults[b.dataset.kind].detail;
+    else if (b.dataset.clear) b.title = "Remove the fault from the simulated rover (test harness only)";
+    else if (!b.dataset.kind) b.removeAttribute("title");
+  }
 }
 
 function onHello(msg) {
@@ -87,6 +109,11 @@ function onPred(pred) {
   S.pred = pred;
   renderPred();
   emit("pred", pred);
+  const fc = pred?.first_critical;
+  if (S.pauseOnCritical && fc && pausedCritKey !== fc.key) {
+    pausedCritKey = fc.key;
+    send("pause", { value: true });
+  }
 }
 
 // ------------------------------------------------------------- 3D + charts
@@ -118,7 +145,7 @@ function buildStatic() {
   $("sev").addEventListener("input", (e) => { $("sevTxt").textContent = pct(+e.target.value); });
   $("faults").addEventListener("click", (e) => {
     const b = e.target.closest("[data-kind]");
-    if (b) send("inject", { kind: b.dataset.kind, severity: +$("sev").value, ramp: +$("ramp").value });
+    if (b && S.connected) send("inject", { kind: b.dataset.kind, severity: +$("sev").value, ramp: +$("ramp").value });
   });
   $("morePlans").addEventListener("click", () => { S.allPlans = !S.allPlans; renderPred(); });
   document.querySelector("#morePanel .tabbar").addEventListener("click", (e) => {
@@ -135,18 +162,22 @@ function buildStatic() {
       `<button data-name="${name}" data-value='${JSON.stringify(v)}'>${t}</button>`).join("")}</div></div>`).join("");
   $("cmds").addEventListener("click", (e) => {
     const b = e.target.closest("[data-name]");
-    if (b) send("cmd", { name: b.dataset.name, value: JSON.parse(b.dataset.value) });
+    if (b && S.connected) send("cmd", { name: b.dataset.name, value: JSON.parse(b.dataset.value) });
   });
 
   $("plans").addEventListener("click", (e) => {
     const b = e.target.closest("[data-act]");
     if (!b) return;
     const id = b.closest(".plan").dataset.id;
-    if (b.dataset.act === "run") { send("plan", { id }); S.preview = null; }
-    else S.preview = S.preview === id ? null : id;
+    if (b.dataset.act === "run") {
+      if (!S.connected) return;
+      send("plan", { id });
+      S.preview = null;
+    } else S.preview = S.preview === id ? null : id;
     renderPred();
     drawCharts();
   });
+  applyGroundGate();
 }
 
 // ------------------------------------------------------------------ render
@@ -187,13 +218,16 @@ function render() {
 
   // top bar
   $("met").textContent = "MET " + fmtMET(sn.t);
+  if (S.connected) {
+    const sy = sn.sync;
+    const syncCls = { SYNCED: "ok", "LOW RATE": "warn", INIT: "warn", BLIND: "bad" }[sy.state];
+    $("syncPill").className = "pill " + syncCls;
+    $("syncTxt").textContent = sy.state === "BLIND" ? "TWIN BLIND" : `TWIN ${sy.state}`;
+    $("syncSub").textContent = sy.age == null || sy.state === "SYNCED" ? "" : sy.state === "BLIND"
+      ? `no telemetry for ${fmtDur(sy.age)}`
+      : `${sy.rate.toFixed(0)} kbps`;
+  }
   const sy = sn.sync;
-  const syncCls = { SYNCED: "ok", "LOW RATE": "warn", INIT: "warn", BLIND: "bad" }[sy.state];
-  $("syncPill").className = "pill " + syncCls;
-  $("syncTxt").textContent = sy.state === "BLIND" ? "TWIN BLIND" : `TWIN ${sy.state}`;
-  $("syncSub").textContent = sy.age == null || sy.state === "SYNCED" ? "" : sy.state === "BLIND"
-    ? `no telemetry for ${fmtDur(sy.age)}`
-    : `${sy.rate.toFixed(0)} kbps`;
   const mode = tw.dead ? "NO POWER" : tw.cfg.mode === "SAFE" ? (tw.auto_safe ? `SAFE · auto: ${tw.auto_safe}` : "SAFE MODE") : "NOMINAL OPS";
   $("modePill").className = "pill " + (tw.dead ? "bad" : tw.cfg.mode === "SAFE" ? "warn" : "ok");
   $("modeTxt").textContent = mode;
@@ -229,6 +263,12 @@ function render() {
   }).join("") + `<div class="note">How far the telemetry departs from what the twin expected. Above 3.5σ the twin flags an anomaly; the bar shrinks back once it has worked out the cause.${S.truth ? "" : " Tick “Show truth” to compare its health estimates with the hidden real values."}</div>`);
   patch($("estimates"), S.truth ? estimatesTable(h, sn.truth.health, tw.cfg) : "");
   $("modelDot").classList.toggle("hidden", !anoms.size);
+  const anomsKey = [...anoms].sort().join(",");
+  if (anoms.size && anomsKey !== lastAnoms) {
+    lastAnoms = anomsKey;
+    showTab("residPanel");
+  }
+  if (!anoms.size) lastAnoms = "";
 
   cascade.update(sn.couplings, sn.subsystems);
 
@@ -240,7 +280,8 @@ function render() {
   if (sy.state === "BLIND") chips.push(`<span class="pill bad"><span class="dot"></span>no telemetry: showing the twin's own prediction</span>`);
   if (S.truth) chips.push(`<span class="pill" style="color:var(--cyan)">wireframe = hidden truth</span>`);
   patch($("viewChips"), chips.join(""));
-  patch($("chartLegend"), chartLegend());
+  patch($("chartLegend"), chartLegend(S.truth));
+  applyGroundGate();
 
   // commands
   for (const b of $("cmds").querySelectorAll("[data-name]")) {
@@ -360,8 +401,9 @@ $("goConsole").onclick = showConsole;
 $("goGuide").onclick = () => { showConsole(); guide.start(); };
 $("home").onclick = showLanding;
 $("guideBtn").onclick = () => guide.start();
-$("resetBtn").onclick = () => send("reset");
+$("resetBtn").onclick = () => { pausedCritKey = null; send("reset"); };
 $("truth").onchange = (e) => { S.truth = e.target.checked; render(); };
+$("pauseCrit").onchange = (e) => { S.pauseOnCritical = e.target.checked; if (!e.target.checked) pausedCritKey = null; };
 $("speed").onclick = (e) => {
   const b = e.target.closest("button");
   if (!b) return;

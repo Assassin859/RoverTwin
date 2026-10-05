@@ -1,5 +1,7 @@
 // Guided demo: a narrated walk through mirror -> break -> predict -> recover,
 // driven entirely by the live backend (nothing here is scripted telemetry).
+import { EDGE_STORY } from "./edges.js";
+
 const STORY = {
   battery: {
     icon: "🔋", name: "Battery degradation", severity: 0.85,
@@ -33,22 +35,6 @@ const STORY = {
       "Give the rover an onboard comm-loss timer and a stored safe plan",
       "Keep predicting the rover with the twin while it is silent"],
   },
-};
-
-const EDGE_STORY = {
-  "EPS>TCS": "The damaged battery is heating itself, and the heat spreads into the electronics box.",
-  "TCS>EPS": "The temperature is now working against the battery.",
-  "TCS>GNC": "Heat makes the motion sensor drift, so the rover is less sure which way it points.",
-  "TCS>COMMS": "Hot radio electronics lose power, so the signal to Earth weakens.",
-  "TCS>MOB": "It is too hot to drive at full speed, so the rover slows down to protect itself.",
-  "EPS>GNC": "Battery voltage is sagging, so the sensors get noisy.",
-  "EPS>COMMS": "Low battery voltage weakens the radio.",
-  "EPS>MOB": "The battery is low, so the rover drives slower.",
-  "GNC>COMMS": "Unsure of its direction, the antenna misses the orbiter and the signal fades.",
-  "GNC>EPS": "The computer works harder to figure out where it is, and burns extra power.",
-  "GNC>MOB": "Not knowing which way it points, the rover stops driving to stay safe.",
-  "COMMS>EPS": "With no signal, the radio keeps searching at full power and drains the battery.",
-  "COMMS>DATA": "Science data can't be sent home, so the onboard memory fills up.",
 };
 
 const COMMON = [
@@ -131,23 +117,23 @@ export class Guide {
     this.readyAt = null;
     const S = this.S;
     if (step === "intro") {
-      this.spot(["view", "subsPanel"]);
+      this.spot(["subsPanel"]);
       this.render(`<div class="step"><span>1 / 6 · MIRROR</span></div>
-        <h2>This is a live digital twin of a Moon rover</h2>
-        <p>A simulated rover is driving near the lunar south pole and sending telemetry through a relay orbiter, about 2.6 seconds late. Everything you see, the 3D rover, the health tiles and the charts, comes from that telemetry stream.</p>
+        <h2>A live twin, not a dashboard</h2>
+        <p>Telemetry arrives ~2.6 s late from a simulated lunar rover. Health tiles and charts are the twin's estimate — corrected by every frame.</p>
         <div class="row"><button class="cta" data-a="next">NEXT</button></div>`);
     } else if (step === "sync") {
       this.spot(["syncPill", "chartsPanel"]);
       this.render(`<div class="step"><span>2 / 6 · SYNC</span></div>
-        <h2>The twin runs the same physics as the rover</h2>
-        <p>The white dots on the charts are telemetry and the saffron line is the twin. The twin predicts each second ahead with its own model, then corrects itself whenever a frame arrives. If telemetry stops, it keeps predicting on its own. The pill at the top shows whether it is in sync.</p>
+        <h2>Same physics, locked to the radio</h2>
+        <p>White dots = telemetry. Saffron = twin. The top pill shows SYNCED / LOW RATE / BLIND. While blind, the twin keeps predicting alone.</p>
         <div class="row"><button class="cta" data-a="next">NEXT</button></div>`);
     } else if (step === "pick") {
       this.reset();
       this.spot(["faultPanel"]);
       this.render(`<div class="step"><span>3 / 6 · BREAK</span></div>
-        <h2>Pick a fault to inject</h2>
-        <p>On a real mission this happens on its own. Here we break the rover on purpose, safely, to see what the twin does.</p>
+        <h2>Inject a fault</h2>
+        <p>Break the rover on purpose. Watch the twin diagnose and forecast.</p>
         <div class="cards">${Object.entries(STORY).map(([k, s]) => `
           <button class="card" data-fault="${k}"><span class="ic">${s.icon}</span><b>${s.name}</b><span>${s.analogy}</span></button>`).join("")}</div>`);
     } else if (step === "cascade") {
@@ -155,14 +141,14 @@ export class Guide {
       this.renderCascade();
     } else if (step === "predict") {
       this.send("pause", { value: true });
-      this.spot(["impactPanel", "chartsPanel"]);
+      this.spot(["impactPanel"]);
       const p = S.pred, cont = p.plans.find((x) => x.id === "continue");
       const fc = p.first_critical;
-      const evs = p.events.slice(0, 4);
+      const evs = p.events.slice(0, 3);
       this.render(`<div class="step"><span>5 / 6 · PREDICT</span></div>
         <h2>${fc ? `If nothing is done: ${esc(lc(fc.text))} in ${dur(fc.t)}` : `If nothing is done: ${esc(cont.notes.join(", "))}`}</h2>
-        <p>The simulation is paused. The twin has run the rover forward 2 hours, several times with slightly different guesses, and the red dashed lines and shaded bands on the charts are the result.</p>
-        <ul class="narr">${evs.map((e) => `<li class="${e.level === "crit" ? "bad" : ""}">In ${dur(e.t)}: ${esc(e.text)}</li>`).join("") || "<li>No limits crossed, but the mission is degraded.</li>"}</ul>
+        <p>Paused. Ensemble forecast over 2 h — dashed lines and bands on the charts.</p>
+        <ul class="narr">${evs.map((e) => `<li class="${e.level === "crit" ? "bad" : ""}">In ${dur(e.t)}: ${esc(e.text)}</li>`).join("") || "<li>No hard limits crossed.</li>"}</ul>
         <div class="row"><button class="cta" data-a="next">WHAT CAN WE DO?</button></div>`);
     } else if (step === "decide") {
       this.spot(["plansPanel"]);
@@ -173,15 +159,15 @@ export class Guide {
       const other = plans.find((x) => !pick.includes(x));
       if (other) pick.push(other);
       this.render(`<div class="step"><span>6 / 6 · RECOVER</span></div>
-        <h2>The twin tried every option. What should the operator do?</h2>
-        <p>Each card is a full simulation of what happens next. Hover to see it on the charts in green, then choose.</p>
+        <h2>Pick a recovery plan</h2>
+        <p>Each card is a full 2 h simulation. Hover to preview on the charts, then choose.</p>
         <div class="cards">${pick.map((pl) => `
           <button class="card ${pl === best && pl.id !== "continue" ? "best" : ""}" data-plan="${esc(pl.id)}">
             <b>${esc(pl.name)}</b><span>${esc(pl.plain)}</span>
             <div class="out">score ${pl.score.toFixed(0)} · min charge ${pct(pl.metrics.min_soc)} · battery ${pl.metrics.max_t_bat.toFixed(0)}°C · link ${pct(pl.metrics.link_frac)}</div>
           </button>`).join("")}</div>`);
     } else if (step === "outcome") {
-      this.spot(["view", "chartsPanel"]);
+      this.spot(["impactPanel", "chartsPanel"]);
       this.renderOutcome();
     }
   }
@@ -190,7 +176,7 @@ export class Guide {
     const ready = this.readyAt != null;
     this.render(`<div class="step"><span>4 / 6 · CASCADE</span><span>${STORY[this.kind].icon} ${STORY[this.kind].name}</span></div>
       <h2>Watch the fault spread</h2>
-      <p>The arrows in the "How it spreads" graph light up as one subsystem pushes on another. Each one is an equation in the model, not an animation.</p>
+      <p>Arrows light up when one subsystem pushes another — each edge is an equation, not an animation.</p>
       <ul class="narr">${this.narr.slice(-6).map((n) => `<li class="${n.c}">${esc(n.t)}</li>`).join("") || "<li>Fault injected. Waiting for the effects to show up…</li>"}</ul>
       <div class="row">${ready ? `<button class="cta" data-a="next">SEE THE PREDICTION</button>` : `<span class="note">Running at 60× speed…</span>`}</div>`);
   }

@@ -1,5 +1,7 @@
 // Live subsystem dependency graph. Edge weight = coupling strength computed by
 // the twin's physics model each step; labels state the physical mechanism.
+import { edgeTooltip } from "./edges.js";
+
 const NODES = {
   EPS: [80, 52, "POWER"], TCS: [260, 30, "THERMAL"], COMMS: [440, 52, "COMMS"],
   GNC: [260, 112, "NAV / GNC"], MOB: [80, 165, "MOBILITY"], DATA: [440, 165, "DATA"],
@@ -48,10 +50,14 @@ export class Cascade {
     const ex = x2 - (dx / len) * 29, ey = y2 - (dy / len) * 29;
     const cx = (x1 + x2) / 2 + nx * off, cy = (y1 + y2) / 2 + ny * off;
     const path = el("path", { class: "edge", d: `M${sx},${sy} Q${cx},${cy} ${ex},${ey}` }, this.gEdges);
+    path.style.pointerEvents = "stroke";
+    path.style.cursor = "help";
+    const tip = el("title", {}, path);
     const lg = el("g", {}, this.gLabels);
     const bg = el("rect", { class: "elabel-bg", rx: 3, height: 13 }, lg);
     const tx = el("text", { class: "elabel", x: cx, y: cy + 3, "text-anchor": "middle" }, lg);
-    return (this.edges[key] = { path, lg, bg, tx, cx, cy });
+    const tip2 = el("title", {}, lg);
+    return (this.edges[key] = { path, tip, tip2, lg, bg, tx, cx, cy });
   }
 
   update(couplings, subsystems) {
@@ -64,6 +70,9 @@ export class Cascade {
       e.path.setAttribute("opacity", (0.35 + 0.65 * Math.min(1, s * 2)).toFixed(2));
       e.path.setAttribute("marker-end", `url(#arw-${lvl})`);
       e.path.classList.toggle("flow", s >= 0.12);
+      const tip = edgeTooltip(key, label);
+      e.tip.textContent = tip;
+      e.tip2.textContent = tip;
       const show = s >= 0.2;
       e.lg.style.display = show ? "" : "none";
       if (show && e.tx.textContent !== label) {

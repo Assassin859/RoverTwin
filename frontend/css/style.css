@@ -88,7 +88,7 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 .panel { background: var(--pan); border: 1px solid var(--ln); border-radius: 12px; padding: 10px 12px; position: relative; }
 .panel h3 { margin: 0 0 8px; font-size: 11px; letter-spacing: .1em; color: var(--saf); display: flex; align-items: baseline; gap: 8px; }
 .panel h3 small { font: 500 12px Rajdhani, sans-serif; color: var(--dim); letter-spacing: 0; }
-.view { flex: 1; min-height: 160px; padding: 0; overflow: hidden; }
+.view { flex: 0.55; min-height: 140px; max-height: 42vh; padding: 0; overflow: hidden; }
 .view canvas { width: 100%; height: 100%; display: block; }
 .view-overlay { position: absolute; left: 10px; top: 10px; display: flex; flex-wrap: wrap; gap: 6px; pointer-events: none; max-width: calc(100% - 20px); }
 .view-overlay .pill { background: rgba(10,8,6,.72); backdrop-filter: blur(6px); }
@@ -105,7 +105,8 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 .row2 { flex: none; height: clamp(170px, 25vh, 250px); display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 8px; }
 .row2 .panel { overflow: hidden; display: flex; flex-direction: column; }
 #cascade { flex: 1; width: 100%; min-height: 0; }
-.charts { flex: none; height: clamp(160px, 24vh, 250px); padding: 8px; display: flex; flex-direction: column; gap: 4px; }
+.cascade-cap { flex: none; font-size: 11px; color: var(--dim); margin-top: 4px; letter-spacing: .02em; }
+.charts { flex: none; height: clamp(140px, 20vh, 220px); padding: 8px; display: flex; flex-direction: column; gap: 4px; }
 .charts-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .chart-legend { flex: none; font-size: 12px; color: var(--dim); text-align: center; }
 .chart { position: relative; min-width: 0; }
@@ -184,6 +185,9 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
   background: rgba(255,77,58,.1); border: 1px solid rgba(255,77,58,.45); color: #ffd2cb; transition: .15s; }
 .fbtn .ic { font-size: 20px; }
 .fbtn:hover { background: rgba(255,77,58,.28); border-color: var(--red); color: #fff; }
+.fbtn:disabled, .pbtn.go:disabled, #cmds button:disabled { opacity: .35; cursor: not-allowed; pointer-events: none; }
+.pill.offline { border-color: var(--red); color: #ffb3a8; }
+.pill.offline .dot { background: var(--red); }
 .fault-opts { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 13px; color: var(--mut); }
 .fault-opts label { flex: 1; display: flex; align-items: center; gap: 6px; }
 .fault-opts input[type=range] { flex: 1; min-width: 0; accent-color: var(--saf); }
@@ -226,7 +230,7 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 .pending .st.waiting { color: var(--amb); }
 
 /* tabs: log / commands / model check */
-.tabs { flex: 1; min-height: 220px; display: flex; flex-direction: column; }
+.tabs { flex: 1; min-height: 120px; max-height: 28vh; display: flex; flex-direction: column; }
 .tabbar { display: flex; gap: 4px; margin-bottom: 8px; border-bottom: 1px solid var(--ln2); }
 .tabbar button { background: none; border: 0; border-bottom: 2px solid transparent; padding: 4px 8px 6px; font-size: 14px; font-weight: 700; color: var(--mut); position: relative; }
 .tabbar button.on { color: var(--saf); border-bottom-color: var(--saf); }

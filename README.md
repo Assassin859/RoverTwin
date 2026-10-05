@@ -2,9 +2,13 @@
 
 **TECHFEST 2026–27 Space Technology Hackathon, Problem Statement ST-09**
 
-RoverTwin is a live digital twin of a lunar rover and its relay orbiter. A simulated rover streams noisy, data-rate-limited telemetry over a delayed radio link. The twin runs the same coupled physics, corrects itself with every frame and estimates hidden health parameters from the data. When you inject a fault, it detects it, finds the root cause, predicts the next two hours and simulates every recovery option before a command is sent.
+![Battery fault demo](docs/assets/battery-demo.gif)
 
-The twin never reads the simulated rover's state. It only sees telemetry frames, as a ground segment would (enforced by `tests/test_twin.py`).
+RoverTwin is a **telemetry-synchronised digital twin** of a lunar rover and its relay orbiter — not a dashboard of canned plots. A simulated rover streams noisy, data-rate-limited telemetry over a delayed radio link. The twin runs the same coupled physics, corrects itself with every frame and estimates hidden health parameters from the data. When you inject a fault, it detects it, finds the root cause, predicts the next two hours and simulates every recovery option before a command is sent.
+
+The twin never reads the simulated rover's state. It only sees telemetry frames, as a ground segment would (enforced by `tests/test_twin.py`). “Show truth” in the UI is a **test harness** overlay for fidelity checks — never the twin’s belief.
+
+Judge deck (4 traps answered): [`docs/RoverTwin-ST09.pptx`](docs/RoverTwin-ST09.pptx).
 
 ## What it delivers against ST-09
 
@@ -98,19 +102,51 @@ Irreversible actions carry a small cost. The twin also tries combining the two b
 
 ## Run it
 
+### Cold-start check (demo laptop)
+
+```bash
+# macOS / Linux
+bash scripts/smoke.sh
+```
+
+```powershell
+# Windows
+.\scripts\smoke.ps1
+```
+
+### Unix / macOS
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn backend.app:app --port 8000
+```
+
+### Windows
+
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\activate          # macOS/Linux: source .venv/bin/activate
+.\.venv\Scripts\activate
 pip install -r requirements.txt
 uvicorn backend.app:app --port 8000
 ```
 
 Open <http://localhost:8000>. If port 8000 is taken, use `--port 8765`. Interactive API docs are at `/docs`.
 
-Run the tests (about 7 s):
-
-```powershell
+```bash
 python -m pytest -q
+```
+
+Regenerate the demo GIF / PPT (optional; needs Pillow / python-pptx):
+
+```bash
+pip install pillow python-pptx
+# with the server running:
+python scripts/capture_demo.py --base http://127.0.0.1:8000
+# after placing stills in docs/assets/:
+python scripts/make_gif.py
+python scripts/build_pptx.py
 ```
 
 ## Demo script (3 minutes)
@@ -145,8 +181,16 @@ frontend/
   js/app.js       console state, WebSocket, panels
   js/scene.js     Three.js rover, terrain, relay orbiter, truth ghost
   js/charts.js    telemetry / twin / prediction / plan charts
-  js/cascade.js   live fault-propagation graph
+  js/cascade.js   live fault-propagation graph (edges = equations)
+  js/edges.js     shared edge stories + equation tooltips
   js/guide.js     guided demo + mission report
+docs/
+  RoverTwin-ST09.pptx   judge slides (4 traps)
+  assets/               GIF + stills
+scripts/
+  smoke.sh / smoke.ps1  cold-start + pytest + /api/state
+  capture_demo.py       REST-driven battery timing cues
+  make_gif.py / build_pptx.py
 tests/            cascade, twin convergence, prediction and recovery tests
 ```
 

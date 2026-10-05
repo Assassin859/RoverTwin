@@ -139,6 +139,6 @@ function line(ctx, ts, vs, X, Y, sc, color, w, dash) {
   ctx.setLineDash([]);
 }
 
-export function chartLegend() {
-  return `<span style="color:${C.twin}">━ twin</span> · <span style="color:${C.tm}">● telemetry</span> · <span style="color:${C.pred}">┅ predicted</span> · <span style="color:${C.plan}">━ plan preview</span>`;
+export function chartLegend(truthOn = false) {
+  return `<span style="color:${C.twin}">━ twin</span> · <span style="color:${C.tm}">● telemetry</span> · <span style="color:${C.pred}">┅ predicted</span> · <span style="color:${C.plan}">━ plan preview</span>${truthOn ? ` · <span style="color:${C.truth}">┄ truth (test harness)</span>` : ""}`;
 }
