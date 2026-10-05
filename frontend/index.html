@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>RoverTwin · Mission Digital Twin for Predictive Fault Simulation</title>
+<meta name="description" content="A live digital twin of a lunar rover: telemetry sync, fault injection, cascading-failure propagation, prediction and recovery simulation.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;800&family=Rajdhani:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.min.js", "three/addons/controls/OrbitControls.js": "./vendor/OrbitControls.js" } }
+</script>
+</head>
+<body>
+
+<section id="landing" class="screen on">
+  <div class="land-bg" id="landView"></div>
+  <div class="shade"></div>
+  <div class="land-content">
+    <div>
+      <div class="isro">
+        <svg viewBox="0 0 40 40" width="34" height="34" aria-hidden="true"><circle cx="20" cy="20" r="17" fill="none" stroke="#ff9933" stroke-width="2.5"/><ellipse cx="20" cy="20" rx="17" ry="6.5" fill="none" stroke="#fff" stroke-width="2" transform="rotate(-25 20 20)"/><circle cx="31" cy="13" r="3" fill="#3ecf6a"/><circle cx="20" cy="20" r="4.5" fill="#ff9933"/></svg>
+        <span>A SALUTE TO ISRO. JAI HIND.</span>
+      </div>
+      <div class="tri"></div>
+    </div>
+    <div class="hero">
+      <div class="tag">TECHFEST 2026–27 · ST-09 · Mission Digital Twin for Predictive Fault Simulation</div>
+      <h1>ROVER<br>TWIN</h1>
+      <p class="lead">A live digital twin of a Moon rover. It stays in sync with the telemetry stream, lets you break the rover on purpose, shows how one fault spreads through power, heat, navigation and radio, predicts what happens next and simulates the way out.</p>
+      <ul class="how">
+        <li><b>MIRROR</b>The twin runs the rover's physics and corrects itself with every telemetry frame.</li>
+        <li><b>BREAK</b>Inject battery, thermal, sensor or communication faults, alone or together.</li>
+        <li><b>PREDICT</b>It spots what the model can't explain, finds the root cause and projects 2 hours ahead.</li>
+        <li><b>RECOVER</b>Every recovery option is simulated and ranked before a command is sent.</li>
+      </ul>
+      <div class="ctas">
+        <button class="cta" id="goConsole">OPEN MISSION CONTROL</button>
+        <button class="cta alt" id="goGuide">GUIDED DEMO · 3 MIN</button>
+      </div>
+      <div class="conn off" id="conn">Ground segment: <b>connecting…</b></div>
+    </div>
+  </div>
+</section>
+
+<section id="console" class="screen">
+  <header class="topbar">
+    <button class="brand" id="home" title="Back to start"><i></i>ROVERTWIN</button>
+    <span class="met" id="met">MET 00:00:00</span>
+    <span class="pill" id="syncPill"><span class="dot"></span><span id="syncTxt">INIT</span><small id="syncSub"></small></span>
+    <span class="pill" id="modePill"><span class="dot"></span><span id="modeTxt">NOMINAL</span></span>
+    <span class="spacer"></span>
+    <div class="seg" id="speed" aria-label="Simulation speed">
+      <button data-v="pause" title="Pause / resume">II</button>
+      <button data-v="1">1×</button><button data-v="10">10×</button><button data-v="30">30×</button><button data-v="60">60×</button><button data-v="120">120×</button>
+    </div>
+    <label class="toggle" title="Overlay the hidden ground truth of the simulated rover, to check the twin's accuracy"><input type="checkbox" id="truth"> Truth (test harness)</label>
+    <button class="tbtn hot" id="guideBtn">Guided demo</button>
+    <button class="tbtn" id="resetBtn">Reset</button>
+    <a class="tbtn" href="/docs" target="_blank" rel="noopener">API</a>
+  </header>
+
+  <main class="grid">
+    <aside class="col left">
+      <div class="panel" id="subsPanel"><h3>SUBSYSTEM HEALTH <small>as the twin sees it</small></h3><div id="subs"></div></div>
+      <div class="panel" id="diagPanel"><h3>DIAGNOSIS <small>root causes</small></h3><div id="diag"></div></div>
+      <div class="panel" id="residPanel"><h3>MODEL RESIDUALS <small>telemetry vs twin</small></h3><div id="resid"></div><div id="estimates"></div></div>
+    </aside>
+
+    <section class="col center">
+      <div class="panel view" id="view">
+        <div class="view-overlay" id="viewChips"></div>
+        <div class="view-legend" id="viewLegend">Drag to orbit · scroll to zoom</div>
+      </div>
+      <div class="row2">
+        <div class="panel" id="cascadePanel"><h3>FAULT PROPAGATION <small>live coupling strength from the model</small></h3><svg id="cascade" viewBox="0 0 520 200" preserveAspectRatio="xMidYMid meet"></svg></div>
+        <div class="panel" id="impactPanel"><h3>PREDICTED IMPACT <small>next 2 h if nothing is done</small></h3><div id="impact"></div></div>
+      </div>
+      <div class="panel charts" id="chartsPanel">
+        <div class="charts-grid">
+          <div class="chart"><canvas id="ch-soc"></canvas></div>
+          <div class="chart"><canvas id="ch-t_bat"></canvas></div>
+          <div class="chart"><canvas id="ch-t_av"></canvas></div>
+          <div class="chart"><canvas id="ch-margin"></canvas></div>
+        </div>
+      </div>
+    </section>
+
+    <aside class="col right">
+      <div class="panel" id="faultPanel"><h3>INJECT FAULT <small>test harness</small></h3>
+        <div class="ramp">Onset <select id="ramp"><option value="0">instant</option><option value="60" selected>ramp 1 min</option><option value="600">ramp 10 min</option></select></div>
+        <div id="faults"></div><div class="active-f" id="activeFaults"></div>
+      </div>
+      <div class="panel" id="plansPanel"><h3>RECOVERY OPTIONS <small>simulated 2 h ahead, ranked</small></h3><div id="plans"></div></div>
+      <div class="panel" id="cmdPanel"><h3>COMMANDS <small>via relay uplink</small></h3><div id="cmds"></div><div class="pending" id="pending"></div></div>
+      <div class="panel log" id="logPanel"><h3>MISSION LOG</h3><div id="log"></div></div>
+    </aside>
+  </main>
+  <div id="coach" class="coach hidden" role="dialog" aria-live="polite"></div>
+  <div id="report" class="modal hidden" role="dialog"></div>
+</section>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,165 @@
+# RoverTwin: Mission Digital Twin for Predictive Fault Simulation
+
+**TECHFEST 2026–27 Space Technology Hackathon, Problem Statement ST-09**
+
+RoverTwin is a live digital twin of a lunar rover and its relay orbiter. A simulated rover streams noisy, data-rate-limited telemetry over a delayed radio link. The twin runs the same coupled physics, corrects itself with every frame and estimates hidden health parameters from the data. When you inject a fault, it detects it, finds the root cause, predicts the next two hours and simulates every recovery option before a command is sent.
+
+The twin never reads the simulated rover's state. It only sees telemetry frames, as a ground segment would (enforced by `tests/test_twin.py`).
+
+## What it delivers against ST-09
+
+| ST-09 expected output | Where it lives |
+| --- | --- |
+| Subsystem model | `backend/model.py`: power (EPS), thermal control (TCS), navigation (GNC), radio (COMMS), mobility (MOB) and science data (DATA), coupled through 14 explicit equations, plus onboard fault protection |
+| Telemetry synchronisation | `backend/plant.py` radio link (2.6 s latency, frame cadence limited by data rate, packet loss) and `backend/twin.py` (state blending, sync states SYNCED / LOW RATE / BLIND, uncertainty growth while blind) |
+| Fault injection | Battery degradation, thermal stress, sensor failure and communication loss, at any severity, instant or ramped, alone or combined |
+| Predicted impact | A 2-hour forecast from the twin's *estimated* health. A 5-member ensemble gives uncertainty bands, and the first limit violation is called out |
+| Recovery simulation | 9 recovery plans (plus an auto-combined plan) are each simulated 2 h ahead, scored on safety, comms and mission return, and executed through the real uplink |
+
+## Architecture
+
+```mermaid
+flowchart LR
+  subgraph Moon["Simulated rover (truth, hidden)"]
+    P["RoverPlant<br/>model.step + true health + noise"]
+    F["Fault injector"] --> P
+  end
+  P -- "telemetry frames<br/>2.6 s latency, rate-limited, lossy" --> L["RadioLink"]
+  L -- "commands (only when uplink closes)" --> P
+  L --> T["DigitalTwin<br/>same model.step + estimated health"]
+  T --> E["Estimator<br/>physics inversion, residual z-scores"]
+  E --> D["Diagnosis<br/>root cause vs knock-on"]
+  T --> PR["Predictor<br/>ensemble + recovery plan simulation"]
+  T & D & PR --> API["FastAPI<br/>WebSocket 10 Hz + REST + SQLite"]
+  API --> UI["Operator console (Three.js)<br/>+ guided demo"]
+  UI -- "inject / command / plan" --> API
+```
+
+## The model
+
+All subsystems run in one step function (`backend/model.py`, 1 s step). The equations that connect them:
+
+**EPS (battery):** open-circuit voltage \(V_{oc}(SOC) = 22 + 7\,SOC - 1.5\,e^{-SOC/0.06}\). Battery current comes from \(P = V_{oc} I + I^2 R\), where \(R = R_0 \cdot r_{mult} \cdot e^{-0.025(T_{bat}-25)}\). Charge follows
+\(\dot{SOC} = \big[(P_{sol} - P_{load} - I^2R)\,\eta - P_{leak}\big] / C\).
+
+**TCS (two-node thermal):**
+- \(C_{av}\dot T_{av} = 0.92(P_{av}+P_{sens}+P_{comm}) + 0.8P_{pay} + Q_{sun} + G_{ab}(T_{bat}-T_{av}) - \varepsilon A\,\eta_{rad}\,\sigma(T_{av}^4 - T_{sink}^4)\)
+- \(C_{bat}\dot T_{bat} = I^2R + P_{leak} + Q_{heater} - G_{ab}(T_{bat}-T_{av}) - G_{env}(T_{bat}-T_{sink})\)
+
+**GNC:** attitude error follows \(\dot\theta = |b_{gyro}| - (\theta - \theta_{floor})/\tau\), where \(b_{gyro} = b_{IMU} + 0.0025\,\max(0, T_{av}-45)\). The noise floor grows with heat and low bus voltage. Above 2° of attitude error the rover switches to visual odometry, which costs up to 16 W of extra compute power.
+
+**COMMS (link budget):** \(M = M_0 + G_{ant} + G_{relay} - 12(\theta/10°)^2 - L_{trx} - 0.2\max(0,T_{av}-45) - L_{brownout}(V_{bus}) - L_{range}(t)\), and data rate = \(256\,\text{kbps}\cdot10^{M/10}\). Below 2 kbps there is no downlink. The uplink has a 10 dB advantage.
+
+**Fault protection (onboard autonomy):** the rover enters SAFE mode autonomously if SOC < 18%, avionics > 72°C or battery > 55°C. It halts driving if attitude error exceeds 10°. It starts a signal search (+14 W) after 10 min without lock, and switches to transponder B on the low-gain antenna after 30 min without contact.
+
+### Coupling graph (what the propagation panel draws)
+
+| Edge | Mechanism |
+| --- | --- |
+| EPS → TCS | I²R heating and internal-short heat in the battery |
+| TCS → EPS | heater power; a hot battery ages faster |
+| TCS → GNC | thermal gyro bias and noise |
+| TCS → COMMS | transponder derating above 45°C |
+| TCS → MOB | thermal speed limit |
+| EPS → GNC / COMMS | brownout raises sensor noise and cuts transmit power |
+| EPS → MOB | low-SOC speed limit |
+| GNC → COMMS | high-gain antenna mispointing loss |
+| GNC → EPS | visual-odometry fallback compute power |
+| GNC → MOB | drive halt on poor attitude knowledge |
+| COMMS → EPS | signal-search power |
+| COMMS → DATA | science buffer fills while the link is down |
+| MOB → EPS | drive power vs terrain |
+
+Each edge strength is computed every step from the live model state. The graph is not animated by hand.
+
+## How the twin estimates health
+
+Each estimate inverts one physical equation over a sliding window of telemetry:
+
+| Hidden parameter | Estimated from |
+| --- | --- |
+| Battery resistance | Regression of \(V - V_{oc}(SOC)\) against \(I\) |
+| Internal short (leak) | Battery thermal balance: \(C_{bat}\dot T_{bat}\) minus the known heat terms |
+| Capacity | Regression of SOC against cumulative energy (slope = 1/C) |
+| Radiator efficiency | Avionics thermal balance |
+| IMU-A bias | Gyro innovation minus the thermally explained part |
+| Transponder A loss | Link-margin residual, **or from silence**: if the model says the link should close but no frames arrive, and pointing, power and temperature are nominal, the twin attributes the loss to the transponder |
+
+An anomaly is flagged when a rate residual exceeds 3.5σ for three consecutive windows. It clears when the updated model explains the data again (below 1.5σ). A diagnosis is only reported after it has persisted for 12 windows. A subsystem marked *root cause* has its own finding. Any other degraded subsystem is attributed as a *knock-on* through its strongest incoming coupling. When the faulty unit is bypassed (string isolated, IMU-B, transponder B), its finding stays on the list as *contained*.
+
+## Prediction and recovery
+
+The predictor clones the twin's state and estimated health and runs the model 2 hours ahead at 10 s steps, onboard autonomy included. Five ensemble members with perturbed health and state give the shaded bands. Each applicable plan is simulated the same way. Commands only take effect once the simulated uplink would deliver them, so a plan sent during a blackout is honestly shown as queued. Plans are scored on:
+- safety (60): limit violations, power loss, soft penalties for temperatures still rising at the horizon
+- comms (25): fraction of time the link is up
+- mission return (15): distance driven and science returned
+
+Irreversible actions carry a small cost. The twin also tries combining the two best single plans.
+
+## Run it
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\activate          # macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn backend.app:app --port 8000
+```
+
+Open <http://localhost:8000>. If port 8000 is taken, use `--port 8765`. Interactive API docs are at `/docs`.
+
+Run the tests (about 7 s):
+
+```powershell
+python -m pytest -q
+```
+
+## Demo script (3 minutes)
+
+1. **Landing page → Guided demo.** It resets the mission and explains the twin in plain language.
+2. **Pick a fault** (battery is the clearest). Watch the residual bar spike, the diagnosis appear within about 2 sim-minutes, and the EPS → TCS edge light up.
+3. **Prediction.** The sim pauses on "If nothing is done: battery above 50°C in N min", with the bands on the charts.
+4. **Decide.** Hover the plan cards to preview them in green on the charts, then pick one. The command travels over the uplink and the rover confirms it.
+5. **Mission report.** It shows what happened, what the twin did, why it matters and how to minimise it.
+6. Switch on **Truth (test harness)** in the console to show the hidden true state as a cyan ghost and dotted lines, and the estimated vs true parameters.
+
+## Answers to the judges' questions
+
+- **Which 3+ subsystems, and what equations connect them?** Six subsystems (EPS, TCS, GNC, COMMS, MOB, DATA), connected by the equations above and drawn live as the coupling graph.
+- **Inject battery degradation: where does it show up next, and why?** Battery temperature rises first (internal short plus 5× resistance means more I²R heat). Heat then conducts into the avionics through \(G_{ab}\). SOC drains faster because of the leak. If nothing is done, the battery crosses 50°C and onboard autonomy forces SAFE mode, stopping science. The twin recommends isolating the bad string: half the capacity, but no more heat.
+- **Synchronised to telemetry, or a standalone simulation?** Synchronised. The twin only ingests frames that arrive over a 2.6 s, rate-limited, lossy link. It reports SYNCED / LOW RATE / BLIND, grows its uncertainty while blind, and re-locks after a blackout. Silence itself is used as evidence.
+- **How did you check believability?** `tests/` checks that each fault propagates along the expected edges, and that the twin's estimates converge on the hidden truth. Headless results 40 min after onset: battery leak 56 W vs 58 W true, resistance ×5.18 vs ×5.25, capacity 62% vs 62%. Radiator efficiency 0.377 vs 0.37. Gyro bias 0.108 vs 0.108°/s. Nominal runs raise no false diagnoses. The truth harness lets anyone compare live.
+
+## Project layout
+
+```
+backend/
+  model.py     coupled subsystem physics + onboard autonomy (shared by rover and twin)
+  plant.py     simulated rover, fault injection, radio link
+  twin.py      digital twin: sync, estimation, anomaly detection, diagnosis
+  predict.py   ensemble prediction, recovery plans, scoring
+  mission.py   orchestrator (rover -> link -> twin -> operators)
+  store.py     SQLite time-series store
+  app.py       FastAPI: WebSocket /ws, REST /api/*, static frontend
+frontend/
+  index.html, css/style.css
+  js/app.js       console state, WebSocket, panels
+  js/scene.js     Three.js rover, terrain, relay orbiter, truth ghost
+  js/charts.js    telemetry / twin / prediction / plan charts
+  js/cascade.js   live fault-propagation graph
+  js/guide.js     guided demo + mission report
+tests/            cascade, twin convergence, prediction and recovery tests
+```
+
+## REST API
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/state` | full twin snapshot |
+| GET | `/api/prediction` | latest prediction and ranked plans |
+| POST | `/api/faults` | `{"kind": "battery", "severity": 0.85, "ramp_s": 60}` |
+| DELETE | `/api/faults/{kind}` | clear a fault |
+| POST | `/api/commands` | `{"name": "imu", "value": "B"}` |
+| POST | `/api/plans/{id}` | execute a recovery plan |
+| POST | `/api/sim` | `{"speed": 60}` or `{"paused": true}` |
+| POST | `/api/reset` | new mission |
+| GET | `/api/telemetry`, `/api/telemetry.csv`, `/api/events` | stored history |
