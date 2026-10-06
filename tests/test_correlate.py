@@ -9,15 +9,22 @@ def test_battery_correlation_paths_include_eps_tcs():
     m.advance(2400)
     corr = m.twin.correlations()
     assert corr["matrix"]["EPS"]["TCS"] >= 0.08
-    edge_sets = [tuple(p["edges"]) for p in corr["paths"]]
-    assert any("EPS>TCS" in edges for edges in edge_sets)
     assert "EPS>TCS" in corr["active"]
-    assert any(p["from"] == "EPS" for p in corr["paths"])
-    # Multi-hop via conduction into avionics (EPS→TCS→GNC) should appear for battery demos
-    multi = [p for p in corr["paths"] if len(p["edges"]) >= 2]
-    assert multi or "TCS>GNC" in corr["active"]
-    if multi:
-        assert any("EPS>TCS" in p["edges"] and "TCS>GNC" in p["edges"] for p in multi)
+    assert any(p["from"] == "EPS" and "EPS>TCS" in p["edges"] for p in corr["paths"])
+    # Phantom foreshadowing removed: cool avionics must not light TCS>GNC
+    if m.twin.s.t_av < 40:
+        assert corr["matrix"]["TCS"]["GNC"] < 0.12 or "TCS>GNC" not in corr["active"]
+
+
+def test_thermal_fault_can_light_tcs_gnc():
+    m = Mission(seed=2)
+    m.advance(600)
+    m.inject("thermal", 1.0, 60)
+    m.advance(3000)
+    corr = m.twin.correlations()
+    assert corr["matrix"]["TCS"]["GNC"] >= 0.12 or any(
+        "TCS>GNC" in (p.get("edges") or []) for p in corr["paths"]
+    )
 
 
 def test_snapshot_exposes_correlations():

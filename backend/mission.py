@@ -68,20 +68,23 @@ class Mission:
             self.log(kind, text)
         fdir_texts = [text for kind, text in self.twin.events if kind == "FDIR"]
         self.twin.events = []
-        # Cascading loss stages (physics / FDIR — not secondary fault injects)
+        # Cascading loss stages from *confirmed* diagnoses only
+        confirmed = self.twin.confirmed_findings()
         corr = self.twin.correlations()
         coup = self.twin.o.get("couplings") or {}
-        new_stages = self.cascade.update(
+        result = self.cascade.update(
             self.t,
-            self.twin.findings(),
+            confirmed,
             corr,
             coup,
             self.twin.subsystems(),
             self.twin.view(),
             fdir_texts,
         )
-        for st in new_stages:
+        for st in result.get("new") or []:
             self.log("CASCADE", st["text"])
+        for st in result.get("retracted") or []:
+            self.log("CASCADE", f"Retracted: {st['text']}")
         if self.t - self._last_hist >= HISTORY_DT:
             self._last_hist = self.t
             sample = self.sample()
@@ -108,6 +111,10 @@ class Mission:
             self.log("FAULT", f"[test harness] Cleared {FAULTS[kind]['name'].lower()}")
 
     def command(self, name: str, value, source: str = "operator") -> dict:
+        allowed = {"mode", "drive", "speed", "payload", "imu", "trx", "antenna",
+                   "bat_isolated", "pose", "relay_hp"}
+        if name not in allowed:
+            raise ValueError(f"unknown command {name!r}")
         cmd = self.link.send_command(name, value, self.t)
         if name in GROUND_COMMANDS:
             apply_command(self.plant.s, name, value)
@@ -190,12 +197,12 @@ class Mission:
                 "latency": RadioLink.LATENCY_S,
             },
             "link": {"margin": self.link.margin, "rate": self.link.rate},
-            "subsystems": tw.subsystems(), "findings": tw.findings(),
+            "subsystems": tw.subsystems(), "findings": tw.confirmed_findings(),
             "residuals": {k: round(v, 2) for k, v in tw.z.items()},
             "anomalies": sorted(tw.active_anoms),
             "couplings": {k: [round(v[0], 3), v[1]] for k, v in tw.o["couplings"].items()},
             "correlations": tw.correlations(),
-            "cascade_chain": self.cascade.snapshot(),
+            "cascade_chain": self.cascade.snapshot(tw.o.get("couplings") or {}),
             "prognostics": tw.prognostics(),
             "faults": [{"kind": k, "severity": fl.severity, "level": fl.level(self.t)}
                        for k, fl in self.plant.faults.items()],

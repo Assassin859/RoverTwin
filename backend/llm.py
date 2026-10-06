@@ -71,6 +71,18 @@ def build_context(snap: dict, pred: dict | None) -> dict:
     }
 
 
+def _fmt_dur(s) -> str:
+    try:
+        s = float(s)
+    except (TypeError, ValueError):
+        return str(s)
+    if s < 90:
+        return f"{round(s)} s"
+    if s < 5400:
+        return f"{round(s / 60)} min"
+    return f"{s / 3600:.1f} h"
+
+
 def template_note(context: dict) -> str:
     """Deterministic narration from twin facts (used offline / on LLM failure)."""
     findings = context.get("findings") or []
@@ -81,7 +93,6 @@ def template_note(context: dict) -> str:
     top = context.get("top_finding") or (findings[0] if findings else None)
     if top:
         parts.append(f"Root: {top.get('sub')} — {top.get('text')}.")
-    # Prefer longest path for the cascade sentence
     best = max(paths, key=lambda p: (len(p.get("edges") or []), p.get("strength") or 0), default=None)
     if best:
         chain = " → ".join([best["from"], *(best.get("via") or []), best["to"]])
@@ -93,7 +104,7 @@ def template_note(context: dict) -> str:
         parts.append(f"Latest cascade stage: {context['cascade_latest']}.")
     fc = context.get("first_critical")
     if fc:
-        parts.append(f"If nothing is done: {fc.get('text')} in about {fc.get('t')} s.")
+        parts.append(f"If nothing is done: {fc.get('text')} in about {_fmt_dur(fc.get('t'))}.")
     rec = context.get("recommended_name") or context.get("recommended")
     if rec:
         parts.append(f"Twin-ranked recovery: {rec}.")

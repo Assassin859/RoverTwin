@@ -4,7 +4,7 @@
 
 ![Battery fault demo](docs/assets/battery-demo.gif)
 
-RoverTwin is a **telemetry-synchronised spacecraft / satellite-ops digital twin** of a lunar rover and its relay orbiter — not a dashboard of canned plots. Same ST-09 problem (EPS / TCS / GNC·ADCS / COMMS): a simulated rover streams noisy, data-rate-limited telemetry over a delayed radio link; the twin runs the same coupled physics, corrects itself with every frame and estimates hidden health parameters from the data. When you inject a fault, it detects it, finds the root cause, surfaces cause→effect correlations, predicts the next two hours and simulates every recovery option before a command is sent.
+RoverTwin is a **telemetry-synchronised spacecraft / satellite-ops digital twin** — lunar surface asset + relay satellite (EPS / TCS / ADCS / COMMS). Not a dashboard of canned plots: the twin runs shared physics, corrects from delayed frames, surfaces cause→effect cascades, predicts impact, and ranks recovery before uplink.
 
 The twin never reads the simulated rover's state. It only sees telemetry frames, as a ground segment would (enforced by `tests/test_twin.py`). “Show truth” in the UI is a **test harness** overlay for fidelity checks — never the twin’s belief.
 
@@ -27,7 +27,7 @@ Judge deck (4 traps answered): [`docs/RoverTwin-ST09.pptx`](docs/RoverTwin-ST09.
 
 | ST-09 expected output | Where it lives |
 | --- | --- |
-| Subsystem model | `backend/model.py`: power (EPS), thermal control (TCS), navigation (GNC≈ADCS), radio (COMMS), mobility (MOB) and science data (DATA), coupled through 14 explicit equations, plus onboard fault protection |
+| Subsystem model | `backend/model.py`: power (EPS), thermal (TCS), attitude (ADCS/GNC), radio (COMMS), mobility (MOB) and science data (DATA), coupled through 14 explicit equations, plus onboard fault protection |
 | Telemetry synchronisation | `backend/plant.py` radio link (2.6 s latency, frame cadence limited by data rate, packet loss) and `backend/twin.py` (state blending, sync states SYNCED / LOW RATE / BLIND, uncertainty growth while blind) |
 | Fault injection | Battery degradation, thermal stress, sensor failure and communication loss, at any severity, instant or ramped, alone or combined |
 | Cause→effect correlations | `backend/correlate.py`: 6×6 matrix, multi-hop paths, active edges on each snapshot |
@@ -147,7 +147,7 @@ pip install -r requirements.txt
 uvicorn backend.app:app --port 8000
 ```
 
-Open <http://localhost:8000>. If port 8000 is taken, use `--port 8765`. Interactive API docs are at `/docs`.
+Open <http://localhost:8000>. Each browser console gets a **private** WebSocket mission; REST `/api/*` uses a shared desk for scripts. If port 8000 is taken, use `--port 8765`.
 
 ### Static UI on Vercel
 

@@ -38,7 +38,7 @@ const STORY = {
 };
 
 const COMMON = [
-  "Faults chain through live model edges (EPS/TCS/GNC·ADCS/COMMS) — knock-ons are correlated, not separate gauges.",
+  "Faults chain through live model edges (EPS/TCS/ADCS/COMMS) — knock-ons are correlated, not separate gauges.",
   "Mission control ranks recovery with a 2 h forward simulation before uplink — FDIR with a twin, not guesswork.",
   "Testing on a twin costs nothing. A failure on the Moon can cost crores and years of work.",
 ];
@@ -131,7 +131,7 @@ export class Guide {
       this.spot(["subsPanel"]);
       this.render(`<div class="step"><span>1 / 6 · MIRROR</span></div>
         <h2>Satellite-ops twin — not a dashboard</h2>
-        <p>Ground segment ↔ relay orbiter ↔ lunar rover. Six coupled subsystems (EPS / TCS / GNC·ADCS / COMMS / MOB / DATA). A dashboard replays canned curves; this twin runs the <b>same physics</b> and only ingests delayed frames — it never reads the plant.</p>
+        <p>Ground segment ↔ relay satellite ↔ lunar surface asset. Coupled EPS / TCS / ADCS / COMMS (plus mobility &amp; data). A dashboard replays canned curves; this twin runs the <b>same physics</b> and only ingests delayed frames — it never reads the plant.</p>
         <div class="row"><button class="cta" data-a="next">NEXT</button></div>`);
     } else if (step === "sync") {
       this.spot(["syncPill", "chartsPanel"]);

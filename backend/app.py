@@ -2,6 +2,9 @@
 
 Run:  uvicorn backend.app:app --reload
 Then open http://localhost:8000 (API docs at /docs).
+
+WebSocket consoles each own a private Mission. REST /api/* uses a shared
+operator desk (smoke scripts / capture) — not the multi-user console.
 """
 from __future__ import annotations
 
@@ -10,6 +13,7 @@ import csv
 import io
 import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -29,82 +33,50 @@ PREDICT_EVERY_S = 1.5
 store = Store(ROOT / "data" / "rovertwin.db")
 
 
+@dataclass
+class Session:
+    ws: WebSocket
+    mission: Mission = field(default_factory=lambda: Mission(store=None))
+    sent_event_id: int = 0
+    sent_pred: int = 0
+    predicting: bool = False
+    last_predict: float = 0.0
+    force_predict: bool = True
+
+
 class Hub:
     def __init__(self) -> None:
+        # Shared desk for REST / smoke scripts
         self.mission = Mission(store)
-        self.clients: set[WebSocket] = set()
-        self.sent_event_id = 0
-        self.sent_pred = 0
-        self.predicting = False
-        self.last_predict = 0.0
-        self.force_predict = True
+        self.sessions: dict[WebSocket, Session] = {}
+        self.desk_predicting = False
+        self.desk_last_predict = 0.0
+        self.desk_force_predict = True
+        self.desk_sent_event_id = 0
+        self.desk_sent_pred = 0
 
-    def reset(self) -> None:
+    def reset_desk(self) -> None:
         speed = self.mission.speed
         self.mission = Mission(store)
         self.mission.speed = speed
-        self.sent_event_id = 0
-        self.sent_pred = 0
-        self.force_predict = True
+        self.desk_sent_event_id = 0
+        self.desk_sent_pred = 0
+        self.desk_force_predict = True
 
-    def hello(self) -> dict:
-        m = self.mission
+    def reset_session(self, sess: Session) -> None:
+        speed = sess.mission.speed
+        sess.mission = Mission(store=None)
+        sess.mission.speed = speed
+        sess.sent_event_id = 0
+        sess.sent_pred = 0
+        sess.force_predict = True
+
+    def hello(self, m: Mission) -> dict:
         return {"type": "hello", "meta": m.meta(), "history": list(m.history), "events": list(m.events),
                 "snap": m.snapshot(), "pred": m.prediction}
 
-    async def broadcast(self, msg: dict) -> None:
-        dead = []
-        for ws in self.clients:
-            try:
-                await ws.send_json(msg)
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.clients.discard(ws)
-
-    async def predict(self) -> None:
-        self.predicting = True
-        m = self.mission
-        try:
-            inputs = m.prediction_inputs()
-            pred = await asyncio.to_thread(Mission.compute_prediction, inputs)
-            if m is self.mission:
-                m.set_prediction(pred)
-        finally:
-            self.predicting = False
-
-    async def run(self) -> None:
-        last = time.perf_counter()
-        last_commit = last
-        while True:
-            await asyncio.sleep(TICK_S)
-            now = time.perf_counter()
-            dt, last = min(now - last, 0.5), now
-            m = self.mission
-            if not m.paused:
-                m.advance(m.speed * dt)
-            if not self.predicting and (self.force_predict or now - self.last_predict > PREDICT_EVERY_S):
-                self.force_predict = False
-                self.last_predict = now
-                asyncio.create_task(self.predict())
-            if now - last_commit > 1.0:
-                store.commit()
-                last_commit = now
-            if not self.clients:
-                continue
-            snap = m.snapshot()
-            snap["type"] = "snap"
-            snap["events"] = [e for e in m.events if e["id"] > self.sent_event_id]
-            if snap["events"]:
-                self.sent_event_id = snap["events"][-1]["id"]
-            snap["sample"] = m.history[-1] if m.history else None
-            await self.broadcast(snap)
-            if m.pred_seq != self.sent_pred and m.prediction:
-                self.sent_pred = m.pred_seq
-                await self.broadcast({"type": "pred", "pred": m.prediction})
-
-    def handle(self, msg: dict) -> None:
-        m, op = self.mission, msg.get("op")
+    def handle(self, m: Mission, msg: dict, *, on_reset) -> None:
+        op = msg.get("op")
         if op == "inject":
             m.inject(msg["kind"], float(msg.get("severity", 0.8)), float(msg.get("ramp", 60)))
         elif op == "clear":
@@ -118,11 +90,70 @@ class Hub:
         elif op == "pause":
             m.paused = bool(msg["value"])
         elif op == "reset":
-            self.reset()
+            on_reset()
             return
         else:
             raise ValueError(f"unknown op {op!r}")
-        self.force_predict = True
+
+    async def predict_mission(self, m: Mission, flag_owner, flag_name: str) -> None:
+        setattr(flag_owner, flag_name, True)
+        try:
+            inputs = m.prediction_inputs()
+            pred = await asyncio.to_thread(Mission.compute_prediction, inputs)
+            # Only apply if this mission object is still current
+            if flag_owner is self and flag_name == "desk_predicting" and m is self.mission:
+                m.set_prediction(pred)
+            elif isinstance(flag_owner, Session) and flag_owner.mission is m:
+                m.set_prediction(pred)
+        finally:
+            setattr(flag_owner, flag_name, False)
+
+    async def run(self) -> None:
+        last = time.perf_counter()
+        last_commit = last
+        while True:
+            await asyncio.sleep(TICK_S)
+            now = time.perf_counter()
+            dt, last = min(now - last, 0.5), now
+
+            # Shared desk (REST)
+            desk = self.mission
+            if not desk.paused:
+                desk.advance(desk.speed * dt)
+            if not self.desk_predicting and (self.desk_force_predict or now - self.desk_last_predict > PREDICT_EVERY_S):
+                self.desk_force_predict = False
+                self.desk_last_predict = now
+                asyncio.create_task(self.predict_mission(desk, self, "desk_predicting"))
+
+            if now - last_commit > 1.0:
+                store.commit()
+                last_commit = now
+
+            # Private console sessions
+            dead: list[WebSocket] = []
+            for ws, sess in list(self.sessions.items()):
+                m = sess.mission
+                if not m.paused:
+                    m.advance(m.speed * dt)
+                if not sess.predicting and (sess.force_predict or now - sess.last_predict > PREDICT_EVERY_S):
+                    sess.force_predict = False
+                    sess.last_predict = now
+                    asyncio.create_task(self.predict_mission(m, sess, "predicting"))
+                try:
+                    snap = m.snapshot()
+                    snap["type"] = "snap"
+                    snap["events"] = [e for e in m.events if e["id"] > sess.sent_event_id]
+                    if snap["events"]:
+                        sess.sent_event_id = snap["events"][-1]["id"]
+                    snap["sample"] = m.history[-1] if m.history else None
+                    await ws.send_json(snap)
+                    if m.pred_seq != sess.sent_pred and m.prediction:
+                        sess.sent_pred = m.pred_seq
+                        await ws.send_json({"type": "pred", "pred": m.prediction})
+                except Exception:
+                    dead.append(ws)
+            for ws in dead:
+                self.sessions.pop(ws, None)
 
 
 hub = Hub()
@@ -137,33 +168,36 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="RoverTwin ground segment", version="1.0",
-              description="Digital twin of a lunar rover for predictive fault simulation (TECHFEST ST-09).",
+              description="Spacecraft / satellite-ops digital twin (lunar surface asset + relay) for TECHFEST ST-09.",
               lifespan=lifespan)
 
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
     await ws.accept()
-    await ws.send_json(hub.hello())
-    hub.clients.add(ws)
+    sess = Session(ws=ws)
+    hub.sessions[ws] = sess
+    await ws.send_json(hub.hello(sess.mission))
     try:
         while True:
             msg = await ws.receive_json()
-            mission = hub.mission
             try:
-                hub.handle(msg)
+                if msg.get("op") == "reset":
+                    hub.reset_session(sess)
+                    sess.force_predict = True
+                    await ws.send_json(hub.hello(sess.mission))
+                else:
+                    hub.handle(sess.mission, msg, on_reset=lambda: None)
+                    sess.force_predict = True
             except (KeyError, ValueError) as exc:
                 await ws.send_json({"type": "error", "error": str(exc)})
-                continue
-            if msg.get("op") == "reset" or hub.mission is not mission:
-                await hub.broadcast(hub.hello())
     except WebSocketDisconnect:
         pass
     finally:
-        hub.clients.discard(ws)
+        hub.sessions.pop(ws, None)
 
 
-# ------------------------------------------------------------------ REST API
+# ------------------------------------------------------------------ REST API (shared desk)
 class FaultIn(BaseModel):
     kind: str = Field(description="battery | thermal | sensor | comms")
     severity: float = Field(0.8, ge=0, le=1)
@@ -180,12 +214,12 @@ class SimIn(BaseModel):
     paused: bool | None = None
 
 
-@app.get("/api/state", summary="Current twin, telemetry sync, diagnosis and (test-harness) truth")
+@app.get("/api/state", summary="Shared desk twin snapshot (REST). Console uses a private WebSocket mission.")
 def get_state() -> dict:
     return hub.mission.snapshot()
 
 
-@app.get("/api/prediction", summary="Latest predicted impact and ranked recovery plans")
+@app.get("/api/prediction", summary="Latest predicted impact and ranked recovery plans (shared desk)")
 def get_prediction() -> dict:
     return hub.mission.prediction or {}
 
@@ -195,12 +229,12 @@ def get_faults() -> dict:
     return FAULTS
 
 
-@app.post("/api/faults", summary="Inject a fault into the simulated rover (test harness)")
+@app.post("/api/faults", summary="Inject a fault into the shared-desk rover (test harness)")
 def post_fault(f: FaultIn) -> dict:
     if f.kind not in FAULTS:
         raise HTTPException(400, f"unknown fault {f.kind}")
     hub.mission.inject(f.kind, f.severity, f.ramp_s)
-    hub.force_predict = True
+    hub.desk_force_predict = True
     return {"ok": True}
 
 
@@ -210,27 +244,27 @@ def delete_fault(kind: str) -> dict:
     return {"ok": True}
 
 
-@app.post("/api/commands", summary="Send a command to the rover through the uplink")
+@app.post("/api/commands", summary="Send a command through the uplink (shared desk)")
 def post_command(c: CommandIn) -> dict:
     try:
         cmd = hub.mission.command(c.name, c.value)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    hub.force_predict = True
+    hub.desk_force_predict = True
     return cmd
 
 
-@app.post("/api/plans/{plan_id}", summary="Execute a recovery plan simulated by the twin")
+@app.post("/api/plans/{plan_id}", summary="Execute a recovery plan (shared desk)")
 def post_plan(plan_id: str) -> dict:
     try:
         hub.mission.run_plan(plan_id)
     except ValueError as exc:
-        raise HTTPException(404, str(exc))
-    hub.force_predict = True
+        raise HTTPException(400, str(exc))
+    hub.desk_force_predict = True
     return {"ok": True}
 
 
-@app.post("/api/sim", summary="Change simulation speed or pause")
+@app.post("/api/sim", summary="Set shared-desk simulation speed or pause")
 def post_sim(s: SimIn) -> dict:
     if s.speed is not None:
         hub.mission.speed = max(0.5, min(240.0, s.speed))
@@ -239,10 +273,9 @@ def post_sim(s: SimIn) -> dict:
     return {"speed": hub.mission.speed, "paused": hub.mission.paused}
 
 
-@app.post("/api/reset", summary="Restart the mission")
+@app.post("/api/reset", summary="Restart the shared-desk mission")
 async def post_reset() -> dict:
-    hub.reset()
-    await hub.broadcast(hub.hello())
+    hub.reset_desk()
     return {"ok": True}
 
 
@@ -253,8 +286,13 @@ def llm_status() -> dict:
 
 @app.post("/api/llm/explain", summary="Plain-language cause→effect note grounded on twin correlations")
 async def llm_explain() -> dict:
-    snap = hub.mission.snapshot()
-    pred = hub.mission.prediction
+    # Prefer an active console session if exactly one; else shared desk
+    if len(hub.sessions) == 1:
+        m = next(iter(hub.sessions.values())).mission
+    else:
+        m = hub.mission
+    snap = m.snapshot()
+    pred = m.prediction
     ctx = llm_mod.build_context(snap, pred)
     return await asyncio.to_thread(llm_mod.explain, ctx)
 
@@ -280,9 +318,8 @@ def get_csv() -> StreamingResponse:
         w = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
         w.writeheader()
         w.writerows(rows)
-    buf.seek(0)
     return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv",
-                             headers={"Content-Disposition": "attachment; filename=rovertwin_telemetry.csv"})
+                             headers={"Content-Disposition": "attachment; filename=telemetry.csv"})
 
 
-app.mount("/", StaticFiles(directory=ROOT / "frontend", html=True), name="frontend")
+app.mount("/", StaticFiles(directory=str(ROOT / "frontend"), html=True), name="frontend")

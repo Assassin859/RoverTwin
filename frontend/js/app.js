@@ -14,11 +14,11 @@ let llmTimer = null;
 let llmBusy = false;
 let llmPending = false;
 const SUBS_ORDER = ["EPS", "TCS", "GNC", "COMMS", "MOB", "DATA"];
-const MATRIX_LABEL = { EPS: "P", TCS: "T", GNC: "G", COMMS: "C", MOB: "M", DATA: "D" };
+const MATRIX_LABEL = { EPS: "P", TCS: "T", GNC: "A", COMMS: "C", MOB: "M", DATA: "D" };
 
 const ICON = { battery: "🔋", thermal: "🌡️", sensor: "🧭", comms: "📡" };
 const SHORT_FAULT = { battery: "Battery", thermal: "Overheat", sensor: "Sensor", comms: "Radio" };
-const SUB_NAME = { EPS: "POWER", TCS: "THERMAL", GNC: "NAV", COMMS: "COMMS", MOB: "MOBILITY", DATA: "DATA" };
+const SUB_NAME = { EPS: "POWER", TCS: "THERMAL", GNC: "ADCS", COMMS: "COMMS", MOB: "MOBILITY", DATA: "DATA" };
 const TICKER_KINDS = new Set(["FAULT", "FDIR", "TWIN", "DIAG", "PRED", "SYNC", "CASCADE"]);
 const KIND_NAME = { FAULT: "FAULT", FDIR: "ROVER", TWIN: "TWIN", DIAG: "DIAG", PRED: "PRED", CMD: "CMD", SYNC: "LINK", SYS: "SYS", CASCADE: "CHAIN" };
 
@@ -396,7 +396,7 @@ function renderCorrMatrix(matrix, hi, paths) {
     patch($("corrMatrix"), "");
     return;
   }
-  const legend = `<div class="mx-leg">P=Power · T=Thermal · G=GNC/ADCS · C=Comms · M=Mobility · D=Data</div>`;
+  const legend = `<div class="mx-leg">P=Power · T=Thermal · A=ADCS · C=Comms · M=Mobility · D=Data</div>`;
   const cells = [`<div class="mh"></div>` + SUBS_ORDER.map((b) => `<div class="mh">${MATRIX_LABEL[b]}</div>`).join("")];
   for (const a of SUBS_ORDER) {
     cells.push(`<div class="mh">${MATRIX_LABEL[a]}</div>`);

@@ -372,6 +372,10 @@ class DigitalTwin:
                 "running on transponder B" if c.trx == "B" else "")
         return out
 
+    def confirmed_findings(self) -> list[dict]:
+        """Findings that have persisted long enough to raise a DIAG (judge-safe)."""
+        return [f for f in self.findings() if self.persist.get(f["id"], 0) >= 12]
+
     def subsystems(self) -> list[dict]:
         s, h, o, c = self.s, self.h, self.o, self.s.cfg
         cap, r_mult, leak = (0.5, 2.0, 0.0) if c.bat_isolated else (h.bat_capacity_frac, h.bat_r_mult, h.bat_leak_w)
@@ -387,7 +391,7 @@ class DigitalTwin:
         }
         if c.mode == "SAFE":
             sc["MOB"] = min(sc["MOB"], 60)
-        found = self.findings()
+        found = self.confirmed_findings()
         roots = {f["sub"] for f in found if not f["contained"]}
         contained = {f["sub"]: f["contained"] for f in found if f["contained"]}
         out = []
@@ -410,7 +414,8 @@ class DigitalTwin:
         return {"capacity": cap, "fade_pct_day": fade_per_day * 100, "rul_days": days}
 
     def correlations(self) -> dict:
-        return build_correlations(self.o.get("couplings") or {}, self.findings())
+        # Paths / active edges only from confirmed roots — avoids false cascade hops
+        return build_correlations(self.o.get("couplings") or {}, self.confirmed_findings())
 
     # --------------------------------------------------------------- snapshot
     def view(self) -> dict:

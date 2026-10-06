@@ -178,9 +178,12 @@ def score(m: dict, p: Params, horizon: float, ser: dict | None = None, cost: flo
 
 
 def plan_cost(cmds: list) -> float:
-    """Small penalty for actions that give up redundancy or margin."""
-    costs = {"bat_isolated": 4.0, "imu": 1.5, "trx": 1.5, "relay_hp": 1.0, "antenna": 0.5}
-    return sum(costs.get(n, 0.0) for n, v in cmds if v not in (False, "A", "HGA"))
+    """Small penalty for actions that give up redundancy or margin (breaks score ties)."""
+    costs = {
+        "bat_isolated": 4.0, "imu": 1.5, "trx": 1.5, "relay_hp": 1.0, "antenna": 0.5,
+        "pose": 0.35, "payload": 0.25, "mode": 0.4, "drive": 0.2, "speed": 0.15,
+    }
+    return sum(costs.get(n, 0.05) for n, v in cmds if v not in (False, "A", "HGA", "NORMAL", 1, 1.0))
 
 
 def _perturb(h: Health, s: State, unc: dict, rng: random.Random) -> tuple[Health, State]:
@@ -243,7 +246,7 @@ def predict_all(s: State, h: Health, up_ok: bool, unc: dict, p: Params, terrain:
                 "blocked": r["blocked"], "needs_uplink": True,
             })
 
-    results.sort(key=lambda r: -r["score"])
+    results.sort(key=lambda r: (-r["score"], plan_cost(r.get("cmds") or []), r["id"]))
     crit = [e for e in base["events"] if e["level"] == "crit"]
     return {
         "t0": s.t, "horizon": horizon, "baseline": base["series"], "band": band,
