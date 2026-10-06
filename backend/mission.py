@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import copy
+import os
 import random
+import re
 from collections import deque
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from .model import GROUND_COMMANDS, LIMITS, Params, apply_command, validate_command
 from .plant import FAULTS, RadioLink, RoverPlant
@@ -14,11 +16,16 @@ from .twin import RESIDUALS, DigitalTwin
 from .cascade_chain import CascadeTracker
 
 HISTORY_DT = 10.0
+# Strip live wattage/dB suffixes like " (59 W battery heat)" for CASCADE dedupe keys
+_CASCADE_LIVE_SUFFIX = re.compile(r"\s*\([^)]*\)\s*$")
 
 
 class Mission:
     def __init__(self, store: Store | None = None, seed: int | None = None):
         self.p = Params()
+        # SATTWIN_DEMO_PASS: default ON for interactive — first AOS ~5 min + pass every orbit; set 0 (or pytest) for stock Params
+        if os.environ.get("SATTWIN_DEMO_PASS", "1") != "0" and not os.environ.get("PYTEST_CURRENT_TEST"):
+            self.p = replace(self.p, gs_pass_phase=0.12, gs_pass_every_n_orbits=1)  # AOS ≈ 285 s, then ~every orbit
         self.rng = random.Random(seed)
         self.plant = RoverPlant(self.p, self.rng)
         self.link = RadioLink(self.p, self.rng)
@@ -43,6 +50,7 @@ class Mission:
         self._incident_prev: dict | None = None
         self._plan_state: dict = {}  # {plan_id, state, at_t}
         self._last_event_texts: dict[str, float] = {}  # text -> last emit t (dedupe)
+        self._cascade_logged: set[str] = set()  # stage ids already emitted (new/resolved only)
         self.log("SYS", "Mission start: LEO EO smallsat — ~500 km, 95 min orbit, ground-station passes")
         if store:
             store.reset()
@@ -93,11 +101,29 @@ class Mission:
             fdir_texts,
         )
         for st in result.get("new") or []:
+            sid = st.get("id") or ""
+            if sid and sid in self._cascade_logged:
+                continue  # same edge/root — do not re-log with updated wattage
+            if sid:
+                self._cascade_logged.add(sid)
+                self._cascade_logged.discard(f"resolved:{sid}")
             self.log("CASCADE", st["text"])
         for st in result.get("resolved") or result.get("retracted") or []:
+            sid = st.get("id") or ""
+            res_key = f"resolved:{sid}" if sid else ""
             if st.get("kind") == "recovery":
+                if res_key and res_key in self._cascade_logged:
+                    continue
+                if res_key:
+                    self._cascade_logged.add(res_key)
                 self.log("CASCADE", st["text"])
             elif st.get("resolved"):
+                if res_key and res_key in self._cascade_logged:
+                    continue
+                if res_key:
+                    self._cascade_logged.add(res_key)
+                if sid:
+                    self._cascade_logged.discard(sid)  # allow re-emit if stage re-opens
                 text = st.get("text") or ""
                 self.log("CASCADE", text if text.startswith("Resolved:") else f"Resolved: {text}")
         self._resolve_backtests()
@@ -110,7 +136,11 @@ class Mission:
 
     def log(self, kind: str, text: str) -> None:
         # Dedupe identical event text within 10 s sim time
-        key = f"{kind}:{text}"
+        key_text = text
+        if kind == "CASCADE":
+            # Normalize: strip parenthetical live wattage/dB so updating suffixes do not bypass dedupe
+            key_text = _CASCADE_LIVE_SUFFIX.sub("", text).strip()
+        key = f"{kind}:{key_text}"
         last = self._last_event_texts.get(key)
         if last is not None and self.t - last < 10.0:
             return

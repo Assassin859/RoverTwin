@@ -33,13 +33,13 @@ export const EDGE_EQ = {
   "MOB>EPS": "P_payload + P_wheels on the bus",
 };
 
-/** Short on-graph label: equation token + live coupling value. */
+/** Short on-graph label: equation token + live coupling value (≤~18 chars). */
 export function edgeLabel(key, live) {
   const eq = EDGE_EQ[key] || key;
-  const short = eq.length > 36 ? eq.slice(0, 34) + "…" : eq;
   const v = (live || "").trim();
-  if (!v) return short;
-  return `${short} · ${v}`;
+  let text = v ? `${eq} · ${v}` : eq;
+  if (text.length > 18) text = text.slice(0, 16) + "…";
+  return text;
 }
 
 /** Full tooltip: story + equation + live value. */

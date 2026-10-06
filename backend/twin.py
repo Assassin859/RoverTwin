@@ -510,14 +510,18 @@ class DigitalTwin:
         out = []
         for sub, score in sc.items():
             score = clamp(score, 0, 100)
+            rounded = round(score)
             cause = ""
             if sub in contained and sub not in roots:
                 cause = f"fault contained: {contained[sub]}"
-            elif sub not in roots and score < 100:
-                cause = knock_on_cause(sub, o["couplings"], roots) or ""
+            elif sub not in roots and rounded < 100:
+                # Knock-on only with an active root finding, or score clearly in WATCH/WARNING band
+                if roots or rounded < 95:
+                    cause = knock_on_cause(sub, o["couplings"], roots) or ""
+            # round(score)==100 → cause must stay empty (already gated by rounded < 100)
             status = status_with_hysteresis(score, self._status_prev.get(sub))
             self._status_prev[sub] = status
-            out.append({"id": sub, "score": round(score), "status": status,
+            out.append({"id": sub, "score": rounded, "status": status,
                         "root": sub in roots, "cause": cause})
         return out
 

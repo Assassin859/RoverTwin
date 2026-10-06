@@ -93,6 +93,43 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 .panel { background: var(--pan); border: 1px solid var(--ln); border-radius: 12px; padding: 10px 12px; position: relative; }
 .panel h3 { margin: 0 0 8px; font-size: 11px; letter-spacing: .1em; color: var(--saf); display: flex; align-items: baseline; gap: 8px; }
 .panel h3 small { font: 500 12px Rajdhani, sans-serif; color: var(--dim); letter-spacing: 0; }
+
+/* each console block gets its own accent colour */
+.panel {
+  --block: var(--saf);
+  border-color: color-mix(in srgb, var(--block) 55%, transparent);
+  background:
+    linear-gradient(165deg, color-mix(in srgb, var(--block) 16%, transparent), transparent 42%),
+    var(--pan);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--block) 12%, transparent);
+}
+.panel h3 { color: var(--block); }
+
+#subsPanel   { --block: #5cc8ff; }   /* HEALTH ? cyan */
+#diagPanel   { --block: #ff4d3a; }   /* WHAT'S WRONG ? red */
+#notePanel   { --block: #a78bfa; }   /* OPERATOR NOTE ? violet */
+#cascadePanel{ --block: #ffb02e; }   /* CASCADE ? amber */
+#impactPanel { --block: #2dd4bf; }   /* FORECAST ? teal */
+#view        { --block: #3b82f6; }   /* 3D ? blue */
+#chartsPanel { --block: #84cc16; }   /* CHARTS ? lime */
+#faultPanel  { --block: #f43f5e; }   /* BREAK ? rose */
+#plansPanel  { --block: #3ecf6a; }   /* FIX ? green */
+#morePanel   { --block: #38bdf8; }   /* LOG/CMDS ? sky */
+
+/* health subsystem tiles: distinct colours per bus */
+.sub.EPS  { border-color: rgba(92,200,255,.55); background: rgba(92,200,255,.08); }
+.sub.EPS b, .sub.EPS .score { color: #5cc8ff; }
+.sub.TCS  { border-color: rgba(255,122,61,.55); background: rgba(255,122,61,.08); }
+.sub.TCS b, .sub.TCS .score { color: #ff7a3d; }
+.sub.GNC  { border-color: rgba(167,139,250,.55); background: rgba(167,139,250,.08); }
+.sub.GNC b, .sub.GNC .score { color: #a78bfa; }
+.sub.COMMS{ border-color: rgba(62,207,106,.55); background: rgba(62,207,106,.08); }
+.sub.COMMS b, .sub.COMMS .score { color: #3ecf6a; }
+.sub.MOB  { border-color: rgba(255,176,46,.55); background: rgba(255,176,46,.08); }
+.sub.MOB b, .sub.MOB .score { color: #ffb02e; }
+.sub.DATA { border-color: rgba(102,217,239,.55); background: rgba(102,217,239,.08); }
+.sub.DATA b, .sub.DATA .score { color: #66d9ef; }
+.sub .score { background: color-mix(in srgb, currentColor 18%, transparent); }
 .view { flex: 0.55; min-height: 140px; max-height: 42vh; padding: 0; overflow: hidden; }
 .view canvas { width: 100%; height: 100%; display: block; }
 .view-overlay { position: absolute; left: 10px; top: 10px; display: flex; flex-wrap: wrap; gap: 6px; pointer-events: none; max-width: calc(100% - 20px); }

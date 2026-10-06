@@ -85,6 +85,7 @@ class CascadeTracker:
                 existing["text"] = text
                 existing["t"] = round(t, 1)
                 return existing  # re-opened — treat as noteworthy
+            # Already active: never re-emit for live wattage / cause text refreshes
             return None
         if sid in self.seen:
             return None
@@ -222,8 +223,9 @@ class CascadeTracker:
             if t - first < self._debounce_s:
                 continue
             self._pending.pop(sid, None)
-            st = self._add(sid, t, "edge", _live_edge_text(edge, coup),
-                           sub=edge.split(">")[-1], edges=[edge])
+            # Emit stable base text once; snapshot refreshes live wattage for UI only
+            base = EDGE_TEXT.get(edge, f"Coupling {edge} lights")
+            st = self._add(sid, t, "edge", base, sub=edge.split(">")[-1], edges=[edge])
             if st:
                 new.append(st)
         # Drop pending edges that fell dark
