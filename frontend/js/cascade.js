@@ -3,7 +3,7 @@
 import { edgeLabel, edgeTooltip } from "./edges.js";
 
 const NODES = {
-  EPS: [80, 52, "POWER"], TCS: [260, 30, "THERMAL"], COMMS: [440, 52, "COMMS"],
+  EPS: [80, 52, "EPS"], TCS: [260, 30, "TCS"], COMMS: [440, 52, "COMMS"],
   GNC: [260, 112, "ADCS"], MOB: [80, 165, "PAYLOAD"], DATA: [440, 165, "OBDH"],
 };
 const STATUS_COLOR = { NOMINAL: "#3ecf6a", WATCH: "#ffb02e", WARNING: "#ff7a3d", CRITICAL: "#ff4d3a" };
@@ -29,6 +29,7 @@ export class Cascade {
     }
     this.gEdges = el("g", {}, svg);
     this.gLabels = el("g", {}, svg);
+    this.gHops = el("g", {}, svg);
     this.gNodes = el("g", {}, svg);
     for (const [id, [x, y, label]] of Object.entries(NODES)) {
       const g = el("g", { class: "node", transform: `translate(${x},${y})` }, this.gNodes);
@@ -68,16 +69,19 @@ export class Cascade {
     path.style.cursor = "help";
     const tip = el("title", {}, path);
     const lg = el("g", {}, this.gLabels);
-    const bg = el("rect", { class: "elabel-bg", rx: 3, height: 13 }, lg);
+    const bg = el("rect", { class: "elabel-bg", rx: 3, height: 14 }, lg);
     const tx = el("text", { class: "elabel", x: cx, y: cy + 3, "text-anchor": "middle" }, lg);
     const tip2 = el("title", {}, lg);
-    return (this.edges[key] = { path, tip, tip2, lg, bg, tx, cx, cy });
+    const hop = el("text", { class: "hop-num", x: cx, y: cy - 10, "text-anchor": "middle" }, this.gHops);
+    hop.style.display = "none";
+    return (this.edges[key] = { path, tip, tip2, lg, bg, tx, hop, cx, cy });
   }
 
   update(couplings, subsystems, activeKeys) {
     const active = new Set(activeKeys || []);
     const hi = this.highlight.size ? this.highlight : active;
     const hasFocus = hi.size > 0;
+    let hopN = 0;
 
     for (const [key, [s, label]] of Object.entries(couplings || {})) {
       const e = this._edge(key);
@@ -97,6 +101,7 @@ export class Cascade {
       const tip = edgeTooltip(key, label);
       e.tip.textContent = tip;
       e.tip2.textContent = tip;
+      // Main screen: equation short label only when strong; story stays in tooltip
       const show = s >= 0.2 || onPath;
       e.lg.style.display = show ? "" : "none";
       e.lg.style.opacity = hasFocus && !onPath ? "0.25" : "1";
@@ -106,7 +111,14 @@ export class Cascade {
         const w = Math.min(220, e.tx.getComputedTextLength() + 8);
         e.bg.setAttribute("width", w);
         e.bg.setAttribute("x", e.cx - w / 2);
-        e.bg.setAttribute("y", e.cy - 7);
+        e.bg.setAttribute("y", e.cy - 8);
+      }
+      if (onPath) {
+        hopN += 1;
+        e.hop.textContent = String(hopN);
+        e.hop.style.display = "";
+      } else {
+        e.hop.style.display = "none";
       }
     }
     for (const sub of subsystems || []) {

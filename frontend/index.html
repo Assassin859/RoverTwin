@@ -6,7 +6,7 @@
 <title>SatTwin · Mission Digital Twin for Predictive Fault Simulation</title>
 <meta name="description" content="A telemetry-synchronised digital twin of a LEO Earth-observation smallsat — not a dashboard. Fault injection, cascading-failure propagation, prediction and recovery simulation.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;800&family=Rajdhani:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&family=Orbitron:wght@600;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/style.css">
 <script type="importmap">
 { "imports": { "three": "./vendor/three.module.min.js", "three/addons/controls/OrbitControls.js": "./vendor/OrbitControls.js" } }
@@ -49,105 +49,165 @@
   <header class="topbar">
     <button class="brand" id="home" title="Back to start"><i></i>SATTWIN</button>
     <span class="met" id="met">MET 00:00:00</span>
-    <span class="pill" id="syncPill" title="Twin sync to telemetry (not a live plant read)"><span class="dot"></span><span id="syncTxt">INIT</span><small id="syncSub"></small></span>
-    <span class="pill" id="modePill"><span class="dot"></span><span id="modeTxt">NOMINAL</span></span>
+    <!-- Merged status: JS writes syncTxt/modeTxt; statusMerged shows combined line -->
+    <span class="pill" id="statusPill" title="Ops mode · twin sync">
+      <span class="dot"></span>
+      <span id="statusMerged">NOMINAL · INIT</span>
+      <span id="syncPill" class="sr-only" aria-hidden="true"><span id="syncTxt">INIT</span><small id="syncSub"></small></span>
+      <span id="modePill" class="sr-only" aria-hidden="true"><span id="modeTxt">NOMINAL</span></span>
+    </span>
     <span id="orbitStrip" class="orbit-strip">Orbit…</span>
     <span class="spacer"></span>
-    <div class="seg" id="speed" aria-label="Simulation speed">
-      <button data-v="pause" title="Pause / resume">II</button>
+    <button type="button" class="tbtn" id="playPauseBtn" title="Pause / resume" data-v="pause">II</button>
+    <select id="speedSelect" class="speed-select" aria-label="Simulation speed">
+      <option value="1">1×</option>
+      <option value="30" selected>30×</option>
+      <option value="120">120×</option>
+    </select>
+    <!-- Hidden legacy speed buttons for applyGroundGate / render sync -->
+    <div class="seg hidden" id="speed" aria-hidden="true">
+      <button data-v="pause">II</button>
       <button data-v="1">1×</button><button data-v="10">10×</button><button data-v="30">30×</button><button data-v="60">60×</button><button data-v="120">120×</button>
     </div>
-    <label class="toggle" title="Pause the sim once when the twin first predicts a hard limit violation"><input type="checkbox" id="pauseCrit" checked> Pause on critical</label>
-    <label class="toggle" title="Test harness only: overlay the hidden plant state. The twin never sees this."><input type="checkbox" id="truth"> Show truth (test harness)</label>
-    <button class="tbtn hot" id="guideBtn">3-min judge path</button>
     <button class="tbtn" id="resetBtn">Reset</button>
-    <a class="tbtn" href="/docs" target="_blank" rel="noopener">API</a>
+    <div class="menu-wrap">
+      <button type="button" class="tbtn" id="moreMenuBtn" aria-haspopup="true" aria-expanded="false" title="More">⋯</button>
+      <div id="moreMenu" class="more-menu hidden" role="menu">
+        <label class="toggle" role="menuitem"><input type="checkbox" id="truth"> Show truth</label>
+        <label class="toggle" role="menuitem"><input type="checkbox" id="pauseCrit" checked> Pause on critical</label>
+        <a class="tbtn" href="/docs" target="_blank" rel="noopener" role="menuitem">API docs</a>
+        <button class="tbtn hot" id="guideBtn" type="button" role="menuitem">3-min judge path</button>
+      </div>
+    </div>
   </header>
 
-  <div id="critBanner" class="crit-banner hidden" role="alert">
-    <span class="crit-msg">PAUSED — critical forecast</span>
-    <button type="button" class="cta" id="critResume">Resume</button>
-  </div>
-  <div id="replayBanner" class="replay-banner hidden" role="status">
-    <span id="replayBannerTxt">Live backend offline — playing recorded mission</span>
-    <button type="button" class="tbtn" id="replayPauseBtn" style="margin-left:8px;padding:2px 8px">Pause</button>
-  </div>
-  <div id="toast" class="toast hidden" role="status"></div>
-
   <main class="grid">
-    <aside class="col left">
-      <div class="panel" id="subsPanel"><h3>HEALTH <small>as the twin sees it</small></h3><div id="subs" class="subs-grid"></div></div>
-      <div class="panel" id="diagPanel"><h3>WHAT'S WRONG <small>found by the twin</small></h3><div id="diag"></div></div>
-      <div class="panel" id="notePanel">
-        <h3>OPERATOR NOTE <small id="noteSub">twin facts only</small>
-          <button class="tbtn" id="explainBtn" type="button" style="margin-left:auto;padding:2px 8px;font-size:11px">Explain</button>
-        </h3>
-        <div id="llmBadge" class="note">Checking Ollama…</div>
-        <div id="llmNote" class="llm-note" role="status" aria-live="polite">Inject a fault to see a grounded cause→effect narration.</div>
+    <aside class="col left" id="leftCol">
+      <div class="panel shell" id="subsPanel">
+        <h3>SPACECRAFT</h3>
+        <div id="subs" class="subs-grid"></div>
+      </div>
+      <div class="panel shell" id="faultPanel">
+        <h3>INJECT FAULT</h3>
+        <div id="faults" class="fault-grid"></div>
+        <details class="advanced">
+          <summary>Advanced</summary>
+          <div class="fault-opts">
+            <label>Severity <input type="range" id="sev" min="0.2" max="1" step="0.05" value="0.85"> <span class="num" id="sevTxt">85%</span></label>
+            <select id="ramp" aria-label="Onset"><option value="0">instant</option><option value="60" selected>over 1 min</option><option value="600">over 10 min</option></select>
+          </div>
+        </details>
+        <div class="active-f" id="activeFaults"></div>
       </div>
     </aside>
 
-    <section class="col center">
-      <div class="row2">
-        <div class="panel" id="cascadePanel">
-          <h3>HOW IT SPREADS <small>live correlations from the model</small></h3>
+    <section class="col center" id="centerCol">
+      <div id="bannerSlot" class="banner-slot">
+        <div id="critBanner" class="crit-banner hidden" role="alert">
+          <span class="crit-msg">PAUSED — critical forecast</span>
+          <button type="button" class="cta" id="critResume">Resume</button>
+        </div>
+        <div id="replayBanner" class="replay-banner hidden" role="status">
+          <span id="replayBannerTxt">Live backend offline — playing recorded mission</span>
+          <button type="button" class="tbtn" id="replayPauseBtn">Pause</button>
+        </div>
+      </div>
+
+      <div class="panel shell cascade-hero" id="cascadePanel">
+        <h3>HOW IT SPREADS</h3>
+        <div class="cascade-wrap">
           <svg id="cascade" viewBox="0 0 520 200" preserveAspectRatio="xMidYMid meet"></svg>
-          <div class="cascade-cap">Edges = live equations · lit path = root → effects · chain reaction = timed losses</div>
-          <div id="chainReaction" class="chain-reaction" aria-live="polite"></div>
-          <div id="corrTable" class="corr-table"></div>
-          <div id="corrMatrix" class="corr-matrix" title="Live 6×6 coupling strengths"></div>
+          <div class="view-inset" id="viewWrap">
+            <div class="panel view" id="view">
+              <div class="view-overlay hidden" id="viewChips"></div>
+              <div class="ticker hidden" id="ticker"></div>
+            </div>
+            <button type="button" class="tbtn inset-expand" id="viewExpand" title="Expand 3D view">⤢</button>
+          </div>
         </div>
-        <div class="panel" id="impactPanel"><h3>WHAT HAPPENS NEXT <small>2 h forecast if nothing is done</small></h3><div id="impact"></div><div id="backtestLine" class="backtest-line note"></div></div>
-      </div>
-      <div class="panel view" id="view">
-        <div class="view-overlay" id="viewChips"></div>
-        <div class="ticker" id="ticker"></div>
-        <div class="view-legend">Drag to orbit · scroll to zoom · Earth LEO</div>
-      </div>
-      <div class="panel charts" id="chartsPanel">
-        <div class="charts-grid">
-          <div class="chart"><canvas id="ch-soc"></canvas></div>
-          <div class="chart"><canvas id="ch-t_bat"></canvas></div>
-          <div class="chart"><canvas id="ch-t_av"></canvas></div>
-          <div class="chart"><canvas id="ch-margin"></canvas></div>
+        <div id="storyCard" class="story-card" aria-live="polite">
+          <div id="storyDiag" class="story-line">Diagnosis: —</div>
+          <div id="storyNext" class="story-line">Next: —</div>
+          <div id="storyRec" class="story-line">Recommended: —</div>
         </div>
-        <div class="chart-legend" id="chartLegend"></div>
       </div>
     </section>
 
-    <aside class="col right">
-      <div class="panel" id="faultPanel"><h3>BREAK SOMETHING <small>test harness</small></h3>
-        <div id="faults" class="fault-grid"></div>
-        <div class="fault-opts">
-          <label>Severity <input type="range" id="sev" min="0.2" max="1" step="0.05" value="0.85"> <span class="num" id="sevTxt">85%</span></label>
-          <select id="ramp" aria-label="Onset"><option value="0">instant</option><option value="60" selected>over 1 min</option><option value="600">over 10 min</option></select>
-        </div>
-        <div class="active-f" id="activeFaults"></div>
-      </div>
-      <div class="panel" id="plansPanel"><h3>HOW TO FIX IT <small>each option simulated 2 h ahead</small></h3><div id="actWait" class="act-wait"></div><div id="plans"></div><button class="more hidden" id="morePlans"></button></div>
-      <div class="panel tabs" id="morePanel">
-        <div class="tabbar" role="tablist">
-          <button role="tab" data-tab="logPanel" class="on">Log</button>
-          <button role="tab" data-tab="cmdPanel">Commands</button>
-          <button role="tab" data-tab="residPanel">Model check <i class="tdot hidden" id="modelDot"></i></button>
-        </div>
-        <div class="tab-pane on" id="logPanel"><div id="log"></div></div>
-        <div class="tab-pane" id="cmdPanel"><div id="cmds"></div><div class="pending" id="pending"></div></div>
-        <div class="tab-pane" id="residPanel">
-          <div id="validateStrip" class="validate-strip"></div>
-          <canvas id="residSpark" class="resid-spark" width="220" height="36" aria-label="Residual sparkline"></canvas>
-          <div id="anomalyScore" class="note"></div>
-          <div id="resid"></div><div id="estimates"></div>
-          <div class="csv-ingest">
-            <label class="note">CSV ingest (live backend) <input type="file" id="csvIngest" accept=".csv,text/csv"></label>
-            <span id="csvIngestStatus" class="note"></span>
-          </div>
-        </div>
+    <aside class="col right" id="rightCol">
+      <div class="panel shell" id="plansPanel">
+        <h3>HOW TO FIX IT</h3>
+        <div id="actWait" class="act-wait"></div>
+        <div id="plans"></div>
+        <button class="more hidden" id="morePlans" type="button"></button>
       </div>
     </aside>
   </main>
+
   <div id="coach" class="coach hidden" role="dialog" aria-live="polite"></div>
   <div id="report" class="modal hidden" role="dialog"></div>
+  <div id="toast" class="toast hidden" role="status"></div>
+
+  <div class="panel tabs details-drawer collapsed" id="morePanel">
+    <button type="button" class="drawer-bar" id="drawerToggle" aria-expanded="false">
+      <span>DETAILS</span>
+      <span class="drawer-hint">Charts · Evidence · Log · Commands</span>
+      <span class="drawer-chevron">▴</span>
+    </button>
+    <div class="drawer-body">
+      <div class="tabbar" role="tablist">
+        <button role="tab" data-tab="chartsPanel" class="on">Charts</button>
+        <button role="tab" data-tab="residPanel">Evidence <i class="tdot hidden" id="modelDot"></i></button>
+        <button role="tab" data-tab="logPanel">Log</button>
+        <button role="tab" data-tab="cmdPanel">Commands</button>
+      </div>
+      <div class="tab-pane on" id="chartsPanel">
+        <div class="chart-toggles">
+          <label><input type="checkbox" id="chToggleSoc" checked disabled> Battery charge</label>
+          <label><input type="checkbox" id="chToggleTbat" checked disabled> Battery temp</label>
+          <label><input type="checkbox" id="chToggleTav"> Avionics temp</label>
+          <label><input type="checkbox" id="chToggleMargin"> Link margin</label>
+        </div>
+        <div class="charts-grid">
+          <div class="chart" data-chart="soc"><canvas id="ch-soc"></canvas></div>
+          <div class="chart" data-chart="t_bat"><canvas id="ch-t_bat"></canvas></div>
+          <div class="chart hidden" data-chart="t_av"><canvas id="ch-t_av"></canvas></div>
+          <div class="chart hidden" data-chart="margin"><canvas id="ch-margin"></canvas></div>
+        </div>
+        <div class="chart-legend" id="chartLegend"></div>
+      </div>
+      <div class="tab-pane" id="residPanel">
+        <div id="validateStrip" class="validate-strip"></div>
+        <div id="backtestLine" class="backtest-line note"></div>
+        <canvas id="residSpark" class="resid-spark" width="220" height="36" aria-label="Residual sparkline"></canvas>
+        <div id="anomalyScore" class="note"></div>
+        <div id="resid"></div><div id="estimates"></div>
+        <div class="csv-ingest">
+          <label class="note">CSV ingest (live backend) <input type="file" id="csvIngest" accept=".csv,text/csv"></label>
+          <span id="csvIngestStatus" class="note"></span>
+        </div>
+        <div id="diagPanel" class="ev-block">
+          <h4>What's wrong</h4>
+          <div id="diag"></div>
+        </div>
+        <div id="impactPanel" class="ev-block">
+          <h4>What happens next</h4>
+          <div id="impact"></div>
+        </div>
+        <div id="notePanel" class="ev-block">
+          <h4>Operator note <small id="noteSub">twin facts only</small>
+            <button class="tbtn" id="explainBtn" type="button">Explain</button>
+          </h4>
+          <div id="llmBadge" class="note" title="Local LLM status">Checking Ollama…</div>
+          <div id="llmNote" class="llm-note" role="status" aria-live="polite">Inject a fault to see a grounded cause→effect narration.</div>
+        </div>
+        <div id="chainReaction" class="chain-reaction" aria-live="polite"></div>
+        <div id="corrTable" class="corr-table"></div>
+        <div id="corrMatrix" class="corr-matrix" title="Live 6×6 coupling strengths"></div>
+      </div>
+      <div class="tab-pane" id="logPanel"><div id="log"></div></div>
+      <div class="tab-pane" id="cmdPanel"><div id="cmds"></div><div class="pending" id="pending"></div></div>
+    </div>
+  </div>
 </section>
 
 <script type="module" src="js/app.js"></script>

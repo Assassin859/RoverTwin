@@ -32,7 +32,8 @@ const MATRIX_LABEL = { EPS: "P", TCS: "T", GNC: "A", COMMS: "C", MOB: "L", DATA:
 
 const ICON = { battery: "🔋", thermal: "🌡️", sensor: "🧭", comms: "📡" };
 const SHORT_FAULT = { battery: "Battery", thermal: "Overheat", sensor: "Sensor", comms: "Radio" };
-const SUB_NAME = { EPS: "POWER", TCS: "THERMAL", GNC: "ADCS", COMMS: "COMMS", MOB: "PAYLOAD", DATA: "OBDH" };
+const SUB_NAME = { EPS: "EPS", TCS: "TCS", GNC: "ADCS", COMMS: "COMMS", MOB: "PAYLOAD", DATA: "OBDH" };
+const STATUS_ICON = { NOMINAL: "●", WATCH: "◐", WARNING: "▲", CRITICAL: "◆" };
 const TICKER_KINDS = new Set(["FAULT", "FDIR", "TWIN", "DIAG", "PRED", "SYNC", "CASCADE"]);
 const KIND_NAME = { FAULT: "FAULT", FDIR: "SAT", TWIN: "TWIN", DIAG: "DIAG", PRED: "PRED", CMD: "CMD", SYNC: "LINK", SYS: "SYS", CASCADE: "CHAIN" };
 
@@ -58,15 +59,6 @@ function dispatchServerMsg(msg) {
   else if (msg.type === "error") console.warn("server:", msg.error);
 }
 
-function showToast(msg, ms = 2800) {
-  const el = $("toast");
-  if (!el) return;
-  el.textContent = msg;
-  el.classList.remove("hidden");
-  clearTimeout(el._t);
-  el._t = setTimeout(() => el.classList.add("hidden"), ms);
-}
-
 function showReplayBanner(on, reason) {
   const el = $("replayBanner");
   if (!el) return;
@@ -76,6 +68,7 @@ function showReplayBanner(on, reason) {
     txt.textContent = reason
       || "Recorded mission (offline backup) — inject/plan disabled; loops when the tape ends.";
   }
+  if (on) coalesceBanners();
 }
 
 async function startReplay() {
@@ -161,6 +154,7 @@ function setConn(on) {
     $("syncPill").className = "pill offline";
     $("syncTxt").textContent = "GROUND OFFLINE";
     $("syncSub").textContent = isDeployHost() ? "loading replay…" : "reconnect WebSocket";
+    updateMergedStatus();
   }
 }
 
@@ -176,8 +170,7 @@ function applyGroundGate() {
     else if (b.dataset.clear) b.title = "Remove the fault from the simulated spacecraft (test harness only)";
     else if (!b.dataset.kind) b.removeAttribute("title");
   }
-  // Speed / reset still usable in live; in replay only truth/pauseCrit UI
-  for (const b of document.querySelectorAll("#speed button, #resetBtn")) {
+  for (const b of document.querySelectorAll("#speed button, #resetBtn, #playPauseBtn, #speedSelect")) {
     if (S.replay) {
       b.disabled = true;
       b.title = "Recorded mission";
@@ -186,6 +179,43 @@ function applyGroundGate() {
       b.removeAttribute("title");
     }
   }
+}
+
+function openDrawer(tabId) {
+  const drawer = $("morePanel");
+  if (!drawer) return;
+  drawer.classList.remove("collapsed");
+  $("drawerToggle")?.setAttribute("aria-expanded", "true");
+  if (tabId) {
+    for (const b of document.querySelectorAll("#morePanel [data-tab]")) b.classList.toggle("on", b.dataset.tab === tabId);
+    for (const p of document.querySelectorAll("#morePanel .tab-pane")) p.classList.toggle("on", p.id === tabId);
+  }
+}
+
+function coalesceBanners() {
+  const crit = $("critBanner");
+  const replay = $("replayBanner");
+  const toast = $("toast");
+  const critOn = crit && !crit.classList.contains("hidden");
+  if (critOn && replay) replay.classList.add("hidden");
+  if ((critOn || (replay && !replay.classList.contains("hidden"))) && toast) toast.classList.add("hidden");
+}
+
+function updateMergedStatus() {
+  const pill = $("statusPill");
+  const merged = $("statusMerged");
+  if (!pill || !merged) return;
+  const mode = $("modeTxt")?.textContent || "NOMINAL";
+  const sync = $("syncTxt")?.textContent?.replace(/^TWIN\s+/, "") || "INIT";
+  const sub = $("syncSub")?.textContent || "";
+  const shortMode = mode.replace(" OPS", "").replace(" MODE", "");
+  merged.textContent = sub ? `${shortMode} · ${sync} ${sub}` : `${shortMode} · ${sync}`;
+  const modeBad = $("modePill")?.classList.contains("bad");
+  const modeWarn = $("modePill")?.classList.contains("warn");
+  const syncBad = $("syncPill")?.className?.includes("bad");
+  const syncWarn = $("syncPill")?.className?.includes("warn");
+  const syncOk = $("syncPill")?.className?.includes("ok");
+  pill.className = "pill " + (modeBad || syncBad ? "bad" : modeWarn || syncWarn ? "warn" : syncOk ? "ok" : "");
 }
 
 function onHello(msg) {
@@ -263,10 +293,22 @@ function showCritBanner(fc) {
   const when = fc.t < 90 ? `${Math.round(fc.t)} s` : fc.t < 5400 ? `${Math.round(fc.t / 60)} min` : `${(fc.t / 3600).toFixed(1)} h`;
   el.querySelector(".crit-msg").textContent = `PAUSED — critical forecast: ${fc.text} in ${when}`;
   el.classList.remove("hidden");
+  coalesceBanners();
 }
 
 function clearCritBanner() {
   $("critBanner")?.classList.add("hidden");
+}
+
+function showToast(msg, ms = 2800) {
+  const el = $("toast");
+  if (!el) return;
+  coalesceBanners();
+  if (!$("critBanner")?.classList.contains("hidden")) return;
+  el.textContent = msg;
+  el.classList.remove("hidden");
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.add("hidden"), ms);
 }
 
 function resumeFromCritical() {
@@ -313,8 +355,14 @@ function buildStatic() {
     const b = e.target.closest("[data-kind]");
     if (b && S.connected) send("inject", { kind: b.dataset.kind, severity: +$("sev").value, ramp: +$("ramp").value });
   });
-  $("morePlans").addEventListener("click", () => { S.allPlans = !S.allPlans; renderPred(); });
-  document.querySelector("#morePanel .tabbar").addEventListener("click", (e) => {
+  $("morePlans").addEventListener("click", () => {
+    if (!S.allPlans && ($("morePanel")?.classList.contains("collapsed"))) {
+      openDrawer("residPanel");
+    }
+    S.allPlans = !S.allPlans;
+    renderPred();
+  });
+  document.querySelector("#morePanel .tabbar")?.addEventListener("click", (e) => {
     const b = e.target.closest("[data-tab]");
     if (b) showTab(b.dataset.tab);
   });
@@ -373,8 +421,37 @@ function tileTag(s) {
 }
 
 export function showTab(id) {
-  for (const b of document.querySelectorAll("#morePanel [data-tab]")) b.classList.toggle("on", b.dataset.tab === id);
-  for (const p of document.querySelectorAll("#morePanel .tab-pane")) p.classList.toggle("on", p.id === id);
+  openDrawer(id);
+}
+
+function renderStory(sn) {
+  const diagEl = $("storyDiag");
+  const nextEl = $("storyNext");
+  const recEl = $("storyRec");
+  if (!diagEl) return;
+  const findings = (sn.findings || []).filter((f) => !f.contained);
+  const passMin = Math.round((sn.link?.next_pass_s || sn.twin?.next_pass_s || 0) / 60);
+  if (!findings.length && !S.pred?.first_critical) {
+    diagEl.innerHTML = `<b>Diagnosis:</b> All systems nominal`;
+    nextEl.innerHTML = `<b>Next:</b> next pass in ${passMin} min`;
+    recEl.innerHTML = `<b>Recommended:</b> No action needed`;
+    return;
+  }
+  const f = findings[0];
+  diagEl.innerHTML = f
+    ? `<b>Diagnosis:</b> ${esc(f.text)} (${pct(f.conf)})`
+    : `<b>Diagnosis:</b> Monitoring cascade…`;
+  const p = S.pred;
+  const fc = p?.first_critical;
+  if (fc) nextEl.innerHTML = `<b>Next:</b> ${esc(fc.text)} in ${fmtDur(fc.t)}`;
+  else if (p?.events?.length) nextEl.innerHTML = `<b>Next:</b> ${esc(p.events[0].text)} in ${fmtDur(p.events[0].t)}`;
+  else nextEl.innerHTML = `<b>Next:</b> limits held over forecast horizon`;
+  const best = p?.plans?.find((x) => x.id !== "continue" && x.name !== "No action needed") || p?.plans?.[0];
+  if (best && best.id !== "continue" && best.name !== "No action needed") {
+    recEl.innerHTML = `<b>Recommended:</b> ${esc(best.name)} (executes at next pass, ${passMin} min)`;
+  } else {
+    recEl.innerHTML = `<b>Recommended:</b> No action needed · next pass ${passMin} min`;
+  }
 }
 
 function render() {
@@ -384,16 +461,15 @@ function render() {
   scene.truthOn = S.truth;
   scene.setState(tw, sn.truth, sn.speed);
 
-  // top bar
+  // top bar — sync + mode → merged status pill
   $("met").textContent = "MET " + fmtMET(sn.t);
   if (S.connected) {
     const sy = sn.sync;
     const syncCls = { SYNCED: "ok", "LOW RATE": "warn", INIT: "warn", BLIND: "bad" }[sy.state];
-    $("syncPill").className = "pill " + syncCls;
-    $("syncTxt").textContent = sy.state === "BLIND" ? "TWIN BLIND" : `TWIN ${sy.state}`;
-    $("syncSub").textContent = sy.age == null || sy.state === "SYNCED" ? "" : sy.state === "BLIND"
-      ? `no telemetry for ${fmtDur(sy.age)}`
-      : `${sy.rate.toFixed(0)} kbps`;
+    if ($("syncPill")) $("syncPill").className = "pill " + syncCls;
+    $("syncTxt").textContent = sy.state === "BLIND" ? "BLIND" : sy.state;
+    $("syncSub").textContent = sy.age == null || sy.state === "SYNCED" ? (sy.state === "SYNCED" && sy.rate ? `${sy.rate.toFixed(0)} kbps` : "")
+      : sy.state === "BLIND" ? `no TM ${fmtDur(sy.age)}` : `${sy.rate.toFixed(0)} kbps`;
   }
   const sy = sn.sync;
   const worst = (sn.subsystems || []).reduce((w, s) => {
@@ -405,12 +481,13 @@ function render() {
   if (tw.dead) mode = "NO POWER";
   else if (linkBad) mode = "NO LINK";
   else if (worst?.status === "CRITICAL" || (worst && worst.score < 30)) mode = "CRITICAL";
-  else if (tw.cfg.mode === "SAFE") mode = tw.auto_safe ? `SAFE · auto: ${tw.auto_safe}` : "SAFE MODE";
+  else if (tw.cfg.mode === "SAFE") mode = tw.auto_safe ? `SAFE · auto: ${tw.auto_safe}` : "SAFE";
   else if (worst?.status === "WARNING") mode = "DEGRADED";
-  else mode = "NOMINAL OPS";
+  else mode = "NOMINAL";
   const modeBad = tw.dead || linkBad || worst?.status === "CRITICAL" || (worst && worst.score < 30);
-  $("modePill").className = "pill " + (modeBad ? "bad" : tw.cfg.mode === "SAFE" || worst?.status === "WARNING" ? "warn" : "ok");
+  if ($("modePill")) $("modePill").className = "pill " + (modeBad ? "bad" : tw.cfg.mode === "SAFE" || worst?.status === "WARNING" ? "warn" : "ok");
   $("modeTxt").textContent = mode;
+  updateMergedStatus();
   const orb = sn.link || {};
   const orbitEl = $("orbitStrip");
   if (orbitEl) {
@@ -420,18 +497,36 @@ function render() {
       : `${tw.eclipse || orb.eclipse ? "ECLIPSE" : "SUNLIT"} · next pass in ${passMin} min`;
     orbitEl.className = "orbit-strip " + (orb.gs_pass || tw.gs_pass ? "pass" : tw.eclipse || orb.eclipse ? "ecl" : "sun");
   }
-  for (const b of $("speed").children) {
-    const v = b.dataset.v;
-    b.classList.toggle("on", v === "pause" ? sn.paused : !sn.paused && +v === sn.speed);
+  if ($("speed")) {
+    for (const b of $("speed").children) {
+      const v = b.dataset.v;
+      b.classList.toggle("on", v === "pause" ? sn.paused : !sn.paused && +v === sn.speed);
+    }
+  }
+  const pp = $("playPauseBtn");
+  if (pp) pp.textContent = sn.paused ? "▶" : "II";
+  const sel = $("speedSelect");
+  if (sel && !sn.paused) {
+    const opts = [...sel.options].map((o) => +o.value);
+    const nearest = opts.reduce((a, b) => Math.abs(b - sn.speed) < Math.abs(a - sn.speed) ? b : a, opts[0]);
+    if (+sel.value !== nearest) sel.value = String(nearest);
   }
 
-  // subsystems
+  // fault layout class
+  const hasFault = (sn.findings || []).some((f) => !f.contained) || !!S.pred?.first_critical;
+  $("console")?.classList.toggle("has-fault", hasFault);
+
+  // subsystems — compact tiles
   const subs = Object.fromEntries(sn.subsystems.map((s) => [s.id, s]));
   patch($("subs"), Object.entries(SUBS).map(([id, kv]) => {
     const s = subs[id];
-    return `<div class="sub ${s.status}" title="${esc(s.cause || "")}"><div class="sub-h"><b>${SUB_NAME[id]}</b><span class="score">${s.score}</span></div>
-      <div class="kv">${kv(tw, h, tr).map(([k, v, t]) => `<div><span>${k}</span><span>${v}${t ? `<span class="tr">${t}</span>` : ""}</span></div>`).join("")}</div>${tileTag(s)}</div>`;
+    const detail = kv(tw, h, tr).map(([k, v]) => `${k} ${v}`).join(" · ");
+    const tip = [s.cause, detail].filter(Boolean).join("\n");
+    return `<div class="sub ${s.status}" title="${esc(tip)}"><div class="sub-h"><b>${SUB_NAME[id]}</b><span class="score">${s.score}</span></div>
+      <div class="sub-status">${STATUS_ICON[s.status] || "●"} ${s.status}${s.root ? " · ROOT" : ""}</div></div>`;
   }).join(""));
+
+  renderStory(sn);
 
   // diagnosis
   const pr = sn.prognostics;
@@ -479,7 +574,8 @@ function render() {
   const anomsKey = [...anoms].sort().join(",");
   if (anoms.size && anomsKey !== lastAnoms) {
     lastAnoms = anomsKey;
-    showTab("residPanel");
+    $("modelDot")?.classList.remove("hidden");
+    // Do not auto-open DETAILS drawer — keep judge main screen clean
   }
   if (!anoms.size) lastAnoms = "";
 
@@ -767,13 +863,10 @@ function renderPred() {
   const aw = actNowVsWait(p, S.snap.twin?.next_pass_s || S.snap.link?.next_pass_s);
   const awBox = $("actWait");
   if (awBox && aw) {
-    patch(awBox, `
-      <div class="aw act"><h4>ACT NOW</h4><b>${esc(aw.act.name)}</b>
-        <div>score ${aw.act.score.toFixed(0)} · peak ${aw.act.maxTb?.toFixed(0) ?? "—"}°C · min SoC ${pct(aw.act.minSoc ?? 0)}</div>
-        <div class="note">${esc(aw.act.why)}</div></div>
-      <div class="aw wait"><h4>WAIT FOR NEXT PASS</h4><b>${esc(aw.wait.name)}</b>
-        <div>score ${aw.wait.score.toFixed(0)} · peak ${aw.wait.maxTb?.toFixed(0) ?? "—"}°C · min SoC ${pct(aw.wait.minSoc ?? 0)} · next ~${aw.wait.nextPassMin} min</div>
-        <div class="note">${esc(aw.wait.why)}</div></div>`);
+    const waitLine = aw.wait.maxTb != null
+      ? `If we wait: battery ${aw.wait.maxTb.toFixed(0)} °C · score ${aw.wait.score.toFixed(0)} · next pass ~${aw.wait.nextPassMin} min`
+      : `If we wait: ${esc(aw.wait.why)}`;
+    patch(awBox, `<div class="aw wait">${waitLine}</div>`);
   }
 
   const tw = S.snap.twin;
@@ -792,6 +885,7 @@ function renderPred() {
     if (!el) return;
     const m = pl.metrics;
     el.classList.toggle("hidden", i >= shown && S.preview !== pl.id);
+    el.classList.toggle("collapsed", i > 0 && !S.allPlans);
     el.title = `${pl.plain}\nLowest charge ${pct(m.min_soc)} · battery peak ${m.max_t_bat.toFixed(0)}°C · avionics peak ${m.max_t_av.toFixed(0)}°C · link up ${pct(m.link_frac)}`;
     el.classList.toggle("best", i === 0 && pl.id !== "continue");
     el.classList.toggle("preview", S.preview === pl.id);
@@ -799,10 +893,10 @@ function renderPred() {
     el.querySelector(".sc").textContent = pl.score.toFixed(0);
     el.querySelector(".scorebar i").style.width = `${Math.max(0, Math.min(100, pl.score))}%`;
     const why = pl.why || pl.notes?.[0] || "";
-    patch(el.querySelector(".notes"), [
-      why ? `<span class="${why === "all limits respected" || why.includes("nominal") ? "good" : ""}">${esc(why)}</span>` : "",
-      ...pl.notes.slice(0, 1).filter((n) => n !== why).map((n) => `<span class="${n === "all limits respected" ? "good" : ""}">${esc(n)}</span>`),
-    ].join(""));
+    const endState = `peak ${m.max_t_bat.toFixed(0)}°C · min SoC ${pct(m.min_soc)}`;
+    patch(el.querySelector(".notes"), i === 0 || S.allPlans
+      ? `<span>${esc(endState)}</span>${why ? `<span class="${why.includes("nominal") || why === "all limits respected" ? "good" : ""}">${esc(why)}</span>` : ""}`
+      : "");
     const runBtn = el.querySelector("[data-act=run]");
     runBtn.classList.toggle("hidden", pl.id === "continue" || pl.name === "No action needed");
     if (S.replay) {
@@ -815,6 +909,7 @@ function renderPred() {
   const more = $("morePlans");
   more.classList.toggle("hidden", p.plans.length <= 3);
   more.textContent = S.allPlans ? "Show fewer" : `Show all ${p.plans.length} options`;
+  if (S.snap) renderStory(S.snap);
 }
 
 function addLog(e) {
@@ -933,6 +1028,38 @@ $("speed").onclick = (e) => {
   if (b.dataset.v === "pause") send("pause", { value: !S.snap?.paused });
   else { send("pause", { value: false }); send("speed", { value: +b.dataset.v }); }
 };
+$("playPauseBtn")?.addEventListener("click", () => send("pause", { value: !S.snap?.paused }));
+$("speedSelect")?.addEventListener("change", (e) => {
+  send("pause", { value: false });
+  send("speed", { value: +e.target.value });
+});
+$("drawerToggle")?.addEventListener("click", () => {
+  const d = $("morePanel");
+  if (!d) return;
+  d.classList.toggle("collapsed");
+  const collapsed = d.classList.contains("collapsed");
+  $("drawerToggle")?.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  if (!collapsed) drawCharts();
+});
+$("moreMenuBtn")?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  const m = $("moreMenu");
+  if (!m) return;
+  m.classList.toggle("hidden");
+  $("moreMenuBtn")?.setAttribute("aria-expanded", m.classList.contains("hidden") ? "false" : "true");
+});
+document.addEventListener("click", () => {
+  $("moreMenu")?.classList.add("hidden");
+  $("moreMenuBtn")?.setAttribute("aria-expanded", "false");
+});
+$("moreMenu")?.addEventListener("click", (e) => e.stopPropagation());
+$("viewExpand")?.addEventListener("click", () => $("console")?.classList.toggle("view-expanded"));
+[["chToggleTav", "t_av"], ["chToggleMargin", "margin"]].forEach(([tid, key]) => {
+  $(tid)?.addEventListener("change", (e) => {
+    document.querySelector(`.chart[data-chart="${key}"]`)?.classList.toggle("hidden", !e.target.checked);
+    drawCharts();
+  });
+});
 
 const guide = new Guide({ S, bus, send, showConsole });
 addEventListener("resize", drawCharts);

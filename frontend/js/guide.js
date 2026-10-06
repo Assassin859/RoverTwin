@@ -160,10 +160,15 @@ export class Guide {
   }
 
   render(html) {
-    this.coach.innerHTML = html + `<div style="text-align:right;margin-top:6px"><button class="x" data-a="quit">exit demo</button></div>`;
+    const steps = ["intro", "sync", "pick", "cascade", "predict", "decide", "outcome"];
+    const idx = Math.max(0, steps.indexOf(this.step));
+    const dots = steps.slice(0, 6).map((_, i) => `<i class="${i <= idx ? "on" : ""}"></i>`).join("");
+    this.coach.innerHTML = `<div class="coach-strip">
+      <div class="coach-dots">${dots}</div>
+      ${html}
+      <div style="text-align:right"><button class="x" data-a="quit">exit</button></div>
+    </div>`;
     this.coach.classList.remove("hidden");
-    const low = [...document.querySelectorAll(".spot")].some((e) => e.getBoundingClientRect().top > innerHeight * 0.45);
-    this.coach.classList.toggle("top", low);
   }
 
   go(step) {
@@ -178,10 +183,10 @@ export class Guide {
         <div class="row"><button class="cta" data-a="next">NEXT</button><span class="note">auto in 6 s</span></div>`);
       this._later(6000, () => this.step === "intro" && this.go("sync"));
     } else if (step === "sync") {
-      this.spot(["syncPill", "orbitStrip", "chartsPanel"]);
+      this.spot(["statusPill", "orbitStrip", "cascadePanel"]);
       this.render(`<div class="step"><span>2 / 6 · SYNC</span></div>
         <h2>Pass-gated telemetry</h2>
-        <p>Downlink only during AOS. Pill shows SYNCED / LOW RATE / BLIND. Twin never reads the plant.</p>
+        <p>Status pill merges ops mode + SYNCED / LOW RATE / BLIND.</p>
         <div class="row"><button class="cta" data-a="next">NEXT</button><span class="note">auto in 5 s</span></div>`);
       this._later(5000, () => this.step === "sync" && this.go("pick"));
     } else if (step === "pick") {
@@ -209,11 +214,11 @@ export class Guide {
         }
       });
     } else if (step === "cascade") {
-      this.spot(["cascadePanel", "diagPanel", "notePanel"]);
+      this.spot(["cascadePanel", "storyCard"]);
       this.renderCascade();
     } else if (step === "predict") {
       if (!S.replay) this.send("pause", { value: true });
-      this.spot(["impactPanel"]);
+      this.spot(["storyCard", "cascadePanel"]);
       const p = S.pred, cont = p?.plans?.find((x) => x.id === "continue");
       const fc = p?.first_critical;
       const evs = (p?.events || []).slice(0, 3);
@@ -249,7 +254,7 @@ export class Guide {
         this._choosePlan(best.id);
       });
     } else if (step === "outcome") {
-      this.spot(["impactPanel", "chartsPanel"]);
+      this.spot(["plansPanel", "storyCard"]);
       this.renderOutcome();
       // Hands-free: report within wall budget (~2.5 min from start, or 25 s after decide)
       const elapsed = performance.now() - this._wall0;
@@ -290,24 +295,16 @@ export class Guide {
 
   renderCascade() {
     const ready = this.readyAt != null;
-    const corr = this.S.snap?.correlations;
-    const paths = corr?.paths || [];
-    const top = [...paths].sort((a, b) => (b.edges?.length || 0) - (a.edges?.length || 0))[0];
-    const pathLine = top
-      ? `Follow the chain: ${(top.edges || []).join(" → ")} — timed losses stack under CHAIN REACTION.`
-      : "Follow the chain: root → lit edges → capability losses under HOW IT SPREADS.";
     this.render(`<div class="step"><span>4 / 6 · CASCADE</span><span>${STORY[this.kind || "battery"].icon} ${STORY[this.kind || "battery"].name}</span></div>
       <h2>Watch the fault spread</h2>
-      <p>${pathLine}</p>
-      <ul class="narr">${this.narr.slice(-6).map((n) => `<li class="${n.c}">${esc(n.t)}</li>`).join("") || "<li>Waiting for cascade effects…</li>"}</ul>
+      <p>Lit edges on the graph — hover for why. Story card fills in below.</p>
       <div class="row">${ready ? `<button class="cta" data-a="next">SEE THE PREDICTION</button>` : `<span class="note">Running — diagnosis + lit path…</span>`}</div>`);
   }
 
   renderOutcome() {
-    this.render(`<div class="step"><span>OUTCOME</span><span>${dur(Math.max(0, (this.S.snap?.t ?? 0) - (this.m.tDecide || 0)))} after decision</span></div>
+    this.render(`<div class="step"><span>OUTCOME</span></div>
       <h2>${esc(this.m.planName || "Recovery")}</h2>
-      <p>Commands wait for the next ground-station pass, then confirm in telemetry.</p>
-      <ul class="narr">${this.narr.slice(-5).map((n) => `<li class="${n.c}">${esc(n.t)}</li>`).join("")}</ul>
+      <p>Commands wait for the next pass, then confirm in telemetry.</p>
       <div class="row"><button class="cta alt" data-a="report">SHOW REPORT NOW</button></div>`);
   }
 
