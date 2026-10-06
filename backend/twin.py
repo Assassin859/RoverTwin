@@ -59,6 +59,45 @@ def status_of(score: float) -> str:
     return "NOMINAL" if score >= 80 else "WATCH" if score >= 55 else "WARNING" if score >= 30 else "CRITICAL"
 
 
+# Enter / leave bands so tiles don't flicker near a single threshold.
+_STATUS_ENTER = {"CRITICAL": 30, "WARNING": 55, "WATCH": 80}  # score below → enter
+_STATUS_LEAVE = {"CRITICAL": 35, "WARNING": 60, "WATCH": 85}  # score above → leave upward
+
+
+def status_with_hysteresis(score: float, prev: str | None) -> str:
+    """Discrete status with hysteresis around the 80 / 55 / 30 trip points."""
+    s = float(score)
+    cur = prev if prev in ("NOMINAL", "WATCH", "WARNING", "CRITICAL") else status_of(s)
+    # From current band, only leave when crossing the leave threshold
+    if cur == "CRITICAL":
+        if s >= _STATUS_LEAVE["CRITICAL"]:
+            cur = "WARNING" if s < _STATUS_ENTER["WARNING"] else (
+                "WATCH" if s < _STATUS_ENTER["WATCH"] else "NOMINAL")
+        return cur
+    if cur == "WARNING":
+        if s < _STATUS_ENTER["CRITICAL"]:
+            return "CRITICAL"
+        if s >= _STATUS_LEAVE["WARNING"]:
+            return "WATCH" if s < _STATUS_ENTER["WATCH"] else "NOMINAL"
+        return cur
+    if cur == "WATCH":
+        if s < _STATUS_ENTER["CRITICAL"]:
+            return "CRITICAL"
+        if s < _STATUS_ENTER["WARNING"]:
+            return "WARNING"
+        if s >= _STATUS_LEAVE["WATCH"]:
+            return "NOMINAL"
+        return cur
+    # NOMINAL
+    if s < _STATUS_ENTER["CRITICAL"]:
+        return "CRITICAL"
+    if s < _STATUS_ENTER["WARNING"]:
+        return "WARNING"
+    if s < _STATUS_ENTER["WATCH"]:
+        return "WATCH"
+    return "NOMINAL"
+
+
 class DigitalTwin:
     def __init__(self, p: Params):
         self.p = p
@@ -89,6 +128,7 @@ class DigitalTwin:
         self.prev = self.s.clone()
         self.frames_since_est = 0
         self.terrain = 1.0
+        self._status_prev: dict[str, str] = {}
 
     # ------------------------------------------------------------ propagation
     def propagate(self, dt: float, t_now: float) -> None:
@@ -100,7 +140,9 @@ class DigitalTwin:
         if self.sync == "BLIND":
             for e in self.o["events"]:
                 self.events.append(("TWIN", f"Twin expects (unconfirmed): {e}"))
-            self._explain_silence()
+            if self.rx >= 8 and self.o.get("gs_pass"):
+                self._explain_silence()
+            self._detect()
         self._update_sync(t_now, dt)
 
     def _explain_silence(self) -> None:
@@ -141,10 +183,13 @@ class DigitalTwin:
     def _update_sync(self, t_now: float, dt: float) -> None:
         age = t_now - self.last_frame_t
         interval = max(1.0, 8.0 / max(self.last_rate, 1e-6))
+        in_pass = bool(self.o.get("gs_pass"))
         if self.rx < 5:
             new = "INIT"
-        elif age > max(15.0, 4 * interval):
-            new = "BLIND"
+        elif in_pass and age > max(15.0, 4 * interval):
+            new = "BLIND"  # missed frames during an expected pass
+        elif not in_pass:
+            new = "LOW RATE"  # store-and-forward between passes
         elif self.last_rate < 64:
             new = "LOW RATE"
         else:
@@ -200,12 +245,18 @@ class DigitalTwin:
         s.t_av += k * (f["t_av"] - s.t_av)
         s.t_bat += k * (f["t_bat"] - s.t_bat)
         for name in ("x", "z", "heading", "odometer", "shade", "buffer_mb", "no_contact_s", "no_lock_s", "auto_safe"):
-            setattr(s, name, f[name])
+            if name in f:
+                setattr(s, name, f[name])
+        if "wheel_rpm" in f:
+            s.wheel_rpm = float(f["wheel_rpm"])
         s.v_bus = f["v_bus"]
         s.cfg = cfg
         s.dead = False
-        if f["speed"] > 0.01:
-            self.terrain = clamp(f["loads"]["p_mob"] / (p.p_mobility_nom * f["speed"] / p.v_nom), 0.5, 1.6)
+        if f.get("speed", 0) > 0.01 and p.v_nom > 0:
+            try:
+                self.terrain = clamp(f["loads"]["p_mob"] / (p.p_mobility_nom * f["speed"] / p.v_nom), 0.5, 1.6)
+            except (ZeroDivisionError, KeyError, TypeError):
+                pass
         for key in ("soc", "t_av", "t_bat"):
             self.unc[key] = max({"soc": 0.004, "t_av": 0.3, "t_bat": 0.3}[key], self.unc[key] * 0.7)
         self.unc["att_err"] = max(0.2, self.unc["att_err"] * 0.9)
@@ -219,7 +270,7 @@ class DigitalTwin:
         self._resid("gyro", (f["innov"] - exp_innov) / 0.004)
         self._resid("margin", (f["margin"] - m_pred) / 0.8)
 
-        sun = p.q_sun_body * max(0.0, math.sin(sun_elevation(f["t"]))) * (1.0 - f["shade"])
+        sun = p.q_sun_body * max(0.0, math.sin(sun_elevation(f["t"], p))) * (1.0 - f.get("shade", 0))
         L = f["loads"]
         self.win.append({
             "t": f["t"], "soc": f["soc"], "t_av": f["t_av"], "t_bat": f["t_bat"], "v": f["v_bus"],
@@ -383,14 +434,22 @@ class DigitalTwin:
             "EPS": 100 - 60 * (1 - cap) - 6 * max(0, r_mult - 1) - 1.0 * leak - max(0, 0.35 - s.soc) * 200
                    - max(0, s.t_bat - LIMITS["t_bat_max"] + 10) * 2.5,
             "TCS": 100 - 100 * max(0, 1 - h.rad_eff) - max(0, s.t_av - 45) * 2.5 - max(0, -10 - s.t_av) * 3,
-            "GNC": 100 - (300 * h.imu_a_bias if c.imu == "A" else 8) - max(0, s.att_err - 1) * 6,
-            "COMMS": (100 if o["margin"] > 6 else 60 + 40 * max(0, o["margin"]) / 6 if o["margin"] > 0
-                      else 45 if o["down_ok"] else 10) - (1.5 * h.trx_a_loss_db if c.trx == "A" else 5),
-            "MOB": 100 if not c.drive or s.cfg.mode == "SAFE" else 100 * clamp(o["v"] / (self.p.v_nom * c.speed_frac + 1e-9), 0, 1),
+            "GNC": 100 - (300 * h.imu_a_bias if c.imu == "A" else 8) - max(0, s.att_err - 1) * 6
+                   - max(0, (o.get("wheel_rpm") or s.wheel_rpm) / self.p.wheel_cap_rpm - 0.7) * 40,
+            "COMMS": (
+                ((100 if o["margin"] > 6 else 60 + 40 * max(0, o["margin"]) / 6 if o["margin"] > 0
+                  else 45 if o["down_ok"] else 10) - (1.5 * h.trx_a_loss_db if c.trx == "A" else 5))
+                if o.get("gs_pass") else
+                (55 if o.get("searching") else 75) - (1.5 * h.trx_a_loss_db if c.trx == "A" else 5)
+            ),
+            "MOB": (
+                55 if not c.drive or c.mode == "SAFE" else
+                100 * clamp(float(o.get("imaging_duty") or 0), 0, 1) * clamp(1.0 - (s.att_err - 2) / 8.0, 0.2, 1)
+            ),
             "DATA": 100 - 80 * s.buffer_mb / self.p.buffer_cap_mb,
         }
         if c.mode == "SAFE":
-            sc["MOB"] = min(sc["MOB"], 60)
+            sc["MOB"] = min(sc["MOB"], 50)
         found = self.confirmed_findings()
         roots = {f["sub"] for f in found if not f["contained"]}
         contained = {f["sub"]: f["contained"] for f in found if f["contained"]}
@@ -402,16 +461,28 @@ class DigitalTwin:
                 cause = f"fault contained: {contained[sub]}"
             elif sub not in roots and score < 80:
                 cause = knock_on_cause(sub, o["couplings"], roots)
-            out.append({"id": sub, "score": round(score), "status": status_of(score),
+            status = status_with_hysteresis(score, self._status_prev.get(sub))
+            self._status_prev[sub] = status
+            out.append({"id": sub, "score": round(score), "status": status,
                         "root": sub in roots, "cause": cause})
         return out
 
     def prognostics(self) -> dict:
         h, s = self.h, self.s
         fade_per_day = 0.0002 * 2 ** ((s.t_bat - 25.0) / 10.0) * (1 + self.h.bat_leak_w / 20.0)
-        cap = 0.5 if s.cfg.bat_isolated else h.bat_capacity_frac
-        days = max(0.0, (cap - 0.5) / fade_per_day) if cap > 0.5 else 0.0
-        return {"capacity": cap, "fade_pct_day": fade_per_day * 100, "rul_days": days}
+        raw_cap = 0.5 if s.cfg.bat_isolated else h.bat_capacity_frac
+        cap = clamp(raw_cap, 0.0, 1.0)
+        confident = self.n_est.get("cap", 0) >= 20 or s.cfg.bat_isolated
+        if not confident:
+            days = None
+        elif fade_per_day < 1e-6:
+            days = None
+        elif cap > 0.5:
+            days = min(3650.0, max(0.0, (cap - 0.5) / fade_per_day))
+        else:
+            days = 0.0
+        return {"capacity": cap, "fade_pct_day": fade_per_day * 100, "rul_days": days,
+                "rul_ready": confident and days is not None}
 
     def correlations(self) -> dict:
         # Paths / active edges only from confirmed roots — avoids false cascade hops
@@ -432,4 +503,11 @@ class DigitalTwin:
             "no_contact_s": s.no_contact_s,
             "health": {f.name: getattr(self.h, f.name) for f in fields(Health)},
             "unc": dict(self.unc),
+            "sunlit": bool(o.get("sunlit", True)),
+            "eclipse": bool(o.get("eclipse", False)),
+            "gs_pass": bool(o.get("gs_pass", False)),
+            "next_pass_s": float(o.get("next_pass_s") or 0.0),
+            "orbit_angle": float((o.get("orbit") or {}).get("angle", s.heading)),
+            "wheel_rpm": float(o.get("wheel_rpm", s.wheel_rpm)),
+            "imaging_duty": float(o.get("imaging_duty") or 0.0),
         }

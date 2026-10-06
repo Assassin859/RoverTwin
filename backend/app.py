@@ -11,12 +11,16 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import logging
+import os
 import time
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -29,6 +33,7 @@ from . import llm as llm_mod
 ROOT = Path(__file__).resolve().parent.parent
 TICK_S = 0.1
 PREDICT_EVERY_S = 1.5
+log = logging.getLogger("rovertwin.hub")
 
 store = Store(ROOT / "data" / "rovertwin.db")
 
@@ -36,6 +41,7 @@ store = Store(ROOT / "data" / "rovertwin.db")
 @dataclass
 class Session:
     ws: WebSocket
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
     mission: Mission = field(default_factory=lambda: Mission(store=None))
     sent_event_id: int = 0
     sent_pred: int = 0
@@ -71,9 +77,25 @@ class Hub:
         sess.sent_pred = 0
         sess.force_predict = True
 
-    def hello(self, m: Mission) -> dict:
-        return {"type": "hello", "meta": m.meta(), "history": list(m.history), "events": list(m.events),
-                "snap": m.snapshot(), "pred": m.prediction}
+    def session_by_id(self, session_id: str | None) -> Session | None:
+        if not session_id:
+            return None
+        for sess in self.sessions.values():
+            if sess.id == session_id:
+                return sess
+        return None
+
+    def hello(self, sess: Session) -> dict:
+        m = sess.mission
+        return {
+            "type": "hello",
+            "session_id": sess.id,
+            "meta": m.meta(),
+            "history": list(m.history),
+            "events": list(m.events),
+            "snap": m.snapshot(),
+            "pred": m.prediction,
+        }
 
     def handle(self, m: Mission, msg: dict, *, on_reset) -> None:
         op = msg.get("op")
@@ -118,8 +140,11 @@ class Hub:
 
             # Shared desk (REST)
             desk = self.mission
-            if not desk.paused:
-                desk.advance(desk.speed * dt)
+            try:
+                if not desk.paused:
+                    desk.advance(desk.speed * dt)
+            except Exception:
+                log.exception("shared-desk advance failed; continuing")
             if not self.desk_predicting and (self.desk_force_predict or now - self.desk_last_predict > PREDICT_EVERY_S):
                 self.desk_force_predict = False
                 self.desk_last_predict = now
@@ -133,8 +158,11 @@ class Hub:
             dead: list[WebSocket] = []
             for ws, sess in list(self.sessions.items()):
                 m = sess.mission
-                if not m.paused:
-                    m.advance(m.speed * dt)
+                try:
+                    if not m.paused:
+                        m.advance(m.speed * dt)
+                except Exception:
+                    log.exception("session %s advance failed; continuing", sess.id)
                 if not sess.predicting and (sess.force_predict or now - sess.last_predict > PREDICT_EVERY_S):
                     sess.force_predict = False
                     sess.last_predict = now
@@ -142,6 +170,7 @@ class Hub:
                 try:
                     snap = m.snapshot()
                     snap["type"] = "snap"
+                    snap["session_id"] = sess.id
                     snap["events"] = [e for e in m.events if e["id"] > sess.sent_event_id]
                     if snap["events"]:
                         sess.sent_event_id = snap["events"][-1]["id"]
@@ -168,8 +197,27 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="RoverTwin ground segment", version="1.0",
-              description="Spacecraft / satellite-ops digital twin (lunar surface asset + relay) for TECHFEST ST-09.",
+              description="Spacecraft / satellite-ops digital twin (LEO EO smallsat) for TECHFEST ST-09.",
               lifespan=lifespan)
+
+# CORS so a Vercel-hosted UI can call a remote uvicorn (?backend=).
+_cors_extra = [o.strip() for o in os.environ.get("ROVERTWIN_CORS", "").split(",") if o.strip()]
+_cors_origins = [
+    "https://rovertwin.vercel.app",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+    "http://localhost:8765",
+    "http://127.0.0.1:8765",
+    *_cors_extra,
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_origin_regex=r"https://([\w-]+\.)?vercel\.app|http://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.websocket("/ws")
@@ -177,7 +225,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
     await ws.accept()
     sess = Session(ws=ws)
     hub.sessions[ws] = sess
-    await ws.send_json(hub.hello(sess.mission))
+    await ws.send_json(hub.hello(sess))
+    sess.sent_event_id = sess.mission.event_seq
     try:
         while True:
             msg = await ws.receive_json()
@@ -185,7 +234,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 if msg.get("op") == "reset":
                     hub.reset_session(sess)
                     sess.force_predict = True
-                    await ws.send_json(hub.hello(sess.mission))
+                    await ws.send_json(hub.hello(sess))
+                    sess.sent_event_id = sess.mission.event_seq
                 else:
                     hub.handle(sess.mission, msg, on_reset=lambda: None)
                     sess.force_predict = True
@@ -279,15 +329,22 @@ async def post_reset() -> dict:
     return {"ok": True}
 
 
+class ExplainIn(BaseModel):
+    session_id: str | None = Field(None, description="WebSocket console session id from hello/snap")
+
+
 @app.get("/api/llm/status", summary="Whether local Ollama and the configured model are available")
 def llm_status() -> dict:
     return llm_mod.status()
 
 
 @app.post("/api/llm/explain", summary="Plain-language cause→effect note grounded on twin correlations")
-async def llm_explain() -> dict:
-    # Prefer an active console session if exactly one; else shared desk
-    if len(hub.sessions) == 1:
+async def llm_explain(body: ExplainIn = ExplainIn()) -> dict:
+    # Prefer the caller's console session when session_id is provided.
+    sess = hub.session_by_id(body.session_id)
+    if sess is not None:
+        m = sess.mission
+    elif len(hub.sessions) == 1:
         m = next(iter(hub.sessions.values())).mission
     else:
         m = hub.mission

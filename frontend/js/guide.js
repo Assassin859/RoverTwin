@@ -13,34 +13,34 @@ const STORY = {
   },
   thermal: {
     icon: "🌡️", name: "Thermal stress", severity: 1.0,
-    analogy: "Radiator loss → avionics heat → sensors and radio derate.",
-    why: "The lunar surface swings from about +120°C to -170°C. Temperature control keeps every part working.",
-    fix: ["Protect radiators from dust and monitor their efficiency from telemetry",
-      "Schedule heavy work for cooler periods",
-      "Use shade and duty cycling before limits are reached, not after"],
+    analogy: "Radiator loss → avionics heat → ADCS and radio derate.",
+    why: "LEO eclipse still swings thermal load hard. Temperature control keeps every part working.",
+    fix: ["Protect radiators and monitor efficiency from telemetry",
+      "Schedule heavy imaging for sunlit arcs",
+      "Use thermal-safe attitude and duty cycling before limits are reached"],
   },
   sensor: {
     icon: "🧭", name: "Sensor failure", severity: 0.9,
-    analogy: "Gyro bias → attitude error → antenna miss (GNC→COMMS).",
-    why: "Sensors give the rover its sense of direction, and the antenna needs that to find the orbiter.",
-    fix: ["Fly a backup sensor for every critical job",
-      "Cross-check sensors against each other (gyro against sun sensor)",
+    analogy: "Gyro bias → attitude error → antenna miss (ADCS→COMMS).",
+    why: "ADCS needs a clean IMU. Without pointing, the antenna misses the ground station and imaging fails.",
+    fix: ["Fly a backup IMU for every critical axis",
+      "Cross-check gyro against sun sensor",
       "Raise an alert the moment data stops matching the model"],
   },
   comms: {
     icon: "📡", name: "Communication loss", severity: 0.8,
-    analogy: "Transponder loss → blind twin → search power drain.",
-    why: "The radio is the only bridge between Earth and the rover. Without it, even a healthy rover is useless to Earth.",
-    fix: ["Carry a spare transponder and a low-gain antenna that needs no pointing",
-      "Give the rover an onboard comm-loss timer and a stored safe plan",
-      "Keep predicting the rover with the twin while it is silent"],
+    analogy: "Transponder loss → blind twin → OBDH buffer fill.",
+    why: "Ground contact only happens in short passes. Without the radio, even a healthy spacecraft is useless until the next AOS.",
+    fix: ["Carry a spare transponder and a low-gain antenna",
+      "Store-and-forward science until the next pass",
+      "Use silence as evidence when the model says the link should close"],
   },
 };
 
 const COMMON = [
   "Faults chain through live model edges (EPS/TCS/ADCS/COMMS) — knock-ons are correlated, not separate gauges.",
-  "Mission control ranks recovery with a 2 h forward simulation before uplink — FDIR with a twin, not guesswork.",
-  "Testing on a twin costs nothing. A failure on the Moon can cost crores and years of work.",
+  "Mission control ranks recovery with a 2 h forward simulation before the next pass — FDIR with a twin, not guesswork.",
+  "Testing on a twin costs nothing. A failure on orbit can cost crores and years of work.",
 ];
 
 const $ = (id) => document.getElementById(id);
@@ -76,6 +76,7 @@ export class Guide {
 
   start() {
     this.active = true;
+    $("console")?.classList.add("guide-active");
     this.report.classList.add("hidden");
     this.reset();
     this.step = "boot";
@@ -85,6 +86,7 @@ export class Guide {
 
   stop() {
     this.active = false;
+    $("console")?.classList.remove("guide-active");
     this.coach.classList.add("hidden");
     this.report.classList.add("hidden");
     this.spot([]);
@@ -128,16 +130,16 @@ export class Guide {
     this.readyAt = null;
     const S = this.S;
     if (step === "intro") {
-      this.spot(["subsPanel"]);
+      this.spot(["subsPanel", "orbitStrip"]);
       this.render(`<div class="step"><span>1 / 6 · MIRROR</span></div>
-        <h2>Satellite-ops twin — not a dashboard</h2>
-        <p>Ground segment ↔ relay satellite ↔ lunar surface asset. Coupled EPS / TCS / ADCS / COMMS (plus mobility &amp; data). A dashboard replays canned curves; this twin runs the <b>same physics</b> and only ingests delayed frames — it never reads the plant.</p>
+        <h2>LEO EO twin — not a dashboard</h2>
+        <p>Ground segment ↔ LEO smallsat (~95 min orbit). Watch the orbit strip for <b>eclipse</b> vs sunlit and <b>AOS</b> (ground pass). Coupled EPS / TCS / ADCS / COMMS / PAYLOAD / OBDH. A dashboard replays canned curves; this twin runs the <b>same physics</b> and only ingests pass-gated frames — it never reads the plant.</p>
         <div class="row"><button class="cta" data-a="next">NEXT</button></div>`);
     } else if (step === "sync") {
-      this.spot(["syncPill", "chartsPanel"]);
+      this.spot(["syncPill", "orbitStrip", "chartsPanel"]);
       this.render(`<div class="step"><span>2 / 6 · SYNC</span></div>
-        <h2>Telemetry-locked, lossy link</h2>
-        <p>~2.6 s latency, rate-limited and lossy. Pill shows SYNCED / LOW RATE / BLIND. While blind the twin keeps predicting alone, then re-locks when frames return.</p>
+        <h2>Pass-gated telemetry</h2>
+        <p>Downlink and uplink only during ground-station AOS. Pill shows SYNCED / LOW RATE / BLIND. In eclipse or off-pass the twin keeps predicting alone, then re-locks when frames return. Orbit strip cues eclipse and next pass.</p>
         <div class="row"><button class="cta" data-a="next">NEXT</button></div>`);
     } else if (step === "pick") {
       this.reset();
@@ -205,7 +207,7 @@ export class Guide {
   renderOutcome() {
     this.render(`<div class="step"><span>OUTCOME</span><span>${dur(Math.max(0, (this.S.snap?.t ?? 0) - this.m.tDecide))} after the decision</span></div>
       <h2>${esc(this.m.planName)}</h2>
-      <p>Commands travel to the Moon through the relay orbiter, and the rover confirms them in its telemetry.</p>
+      <p>Commands wait for the next ground-station pass, then the spacecraft confirms them in telemetry.</p>
       <ul class="narr">${this.narr.slice(-5).map((n) => `<li class="${n.c}">${esc(n.t)}</li>`).join("")}</ul>
       <div class="row"><button class="cta alt" data-a="report">SHOW REPORT NOW</button></div>`);
   }
@@ -227,8 +229,8 @@ export class Guide {
       const body = e.text.replace("Diagnosis: ", "").replace(/ \(confidence.*\)$/, "");
       this.say("Root finding (twin): " + body + ". Knock-ons show on HOW IT SPREADS via model edges.", "twin");
     } else if (e.kind === "FDIR") {
-      if (e.text.startsWith("Executed command")) this.say("Rover confirms: " + e.text.replace(/^Executed command #\d+: /, ""), "twin");
-      else this.say("The rover protected itself: " + e.text, "bad");
+      if (e.text.startsWith("Executed command")) this.say("Spacecraft confirms: " + e.text.replace(/^Executed command #\d+: /, ""), "twin");
+      else this.say("The spacecraft protected itself: " + e.text, "bad");
     } else if (e.kind === "SYNC" && e.text.startsWith("Telemetry lost")) {
       this.m.tLost ??= e.t;
       this.say("Telemetry stopped. The twin keeps going on its own model.", "bad");
@@ -345,6 +347,7 @@ export class Guide {
     const m = this.m, st = STORY[this.kind], S = this.S;
     m.reported = true;
     this.coach.classList.add("hidden");
+    $("console")?.classList.remove("guide-active");
     this.spot([]);
     this.send("speed", { value: 30 });
     const link = m.samples ? m.linkUp / m.samples : 1;
@@ -358,13 +361,13 @@ export class Guide {
     const twin = [
       m.tDetect != null ? `Spotted an anomaly ${dur(m.tDetect - m.tInject)} after the fault began.` : "No residual anomaly was needed: the effect was visible directly.",
       m.diag ? `${esc(m.diag.replace(/ \(confidence.*\)$/, ""))} (found ${dur(m.tDiag - m.tInject)} after onset).` : "",
-      m.tLost != null ? "Kept predicting the rover while telemetry was lost." : "",
+      m.tLost != null ? "Kept predicting the spacecraft while telemetry was lost." : "",
       m.pred ? esc(m.pred) + "." : "",
       `Simulated ${S.pred?.plans.length ?? "several"} recovery options; you chose "${esc(m.planName)}"${m.best ? ", the twin's top recommendation" : ""}.`,
     ].filter(Boolean);
     this.report.innerHTML = `<div class="box">
       <h2>Mission report: ${st.icon} ${st.name}</h2>
-      <div class="res ${ok ? "ok" : "bad"}">${ok ? "Rover safe. The twin's prediction gave the operator time to act." : "The rover is in trouble. Try the twin's top recommendation next time."}</div>
+      <div class="res ${ok ? "ok" : "bad"}">${ok ? "Spacecraft safe. The twin's prediction gave the operator time to act." : "The spacecraft is in trouble. Try the twin's top recommendation next time."}</div>
       <div class="three">
         <div><h3>WHAT HAPPENED</h3><ul>${li(happened)}</ul></div>
         <div><h3>WHAT THE TWIN DID</h3><ul>${li(twin)}</ul></div>

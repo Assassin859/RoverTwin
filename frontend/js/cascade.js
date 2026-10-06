@@ -1,10 +1,10 @@
 // Live subsystem dependency graph. Edge weight = coupling strength computed by
 // the twin's physics model each step; labels state the physical mechanism.
-import { edgeTooltip } from "./edges.js";
+import { edgeLabel, edgeTooltip } from "./edges.js";
 
 const NODES = {
   EPS: [80, 52, "POWER"], TCS: [260, 30, "THERMAL"], COMMS: [440, 52, "COMMS"],
-  GNC: [260, 112, "GNC/ADCS"], MOB: [80, 165, "MOBILITY"], DATA: [440, 165, "DATA"],
+  GNC: [260, 112, "ADCS"], MOB: [80, 165, "PAYLOAD"], DATA: [440, 165, "OBDH"],
 };
 const STATUS_COLOR = { NOMINAL: "#3ecf6a", WATCH: "#ffb02e", WARNING: "#ff7a3d", CRITICAL: "#ff4d3a" };
 const NS = "http://www.w3.org/2000/svg";
@@ -100,9 +100,10 @@ export class Cascade {
       const show = s >= 0.2 || onPath;
       e.lg.style.display = show ? "" : "none";
       e.lg.style.opacity = hasFocus && !onPath ? "0.25" : "1";
-      if (show && e.tx.textContent !== label) {
-        e.tx.textContent = label;
-        const w = e.tx.getComputedTextLength() + 8;
+      const onText = edgeLabel(key, label);
+      if (show && e.tx.textContent !== onText) {
+        e.tx.textContent = onText;
+        const w = Math.min(220, e.tx.getComputedTextLength() + 8);
         e.bg.setAttribute("width", w);
         e.bg.setAttribute("x", e.cx - w / 2);
         e.bg.setAttribute("y", e.cy - 7);

@@ -9,7 +9,7 @@ export const CHARTS = [
 ];
 
 const C = {
-  grid: "rgba(255,255,255,0.06)", text: "#8f8478", twin: "#ff9933", tm: "#f4ede4", truth: "#5cc8ff",
+  grid: "rgba(255,255,255,0.11)", frame: "rgba(255,255,255,0.14)", text: "#a89a8c", twin: "#ff9933", tm: "#f4ede4", truth: "#5cc8ff",
   pred: "#ff7b6b", band: "rgba(255,123,107,0.16)", unc: "rgba(255,153,51,0.16)", plan: "#3ecf6a", lim: "rgba(255,77,58,0.75)",
 };
 
@@ -42,8 +42,10 @@ export class Chart {
     // frame + grid
     ctx.font = "10px 'IBM Plex Mono', monospace";
     ctx.fillStyle = C.text;
-    ctx.strokeStyle = C.grid;
+    ctx.strokeStyle = C.frame;
     ctx.lineWidth = 1;
+    ctx.strokeRect(L + 0.5, T + 0.5, pw - 1, ph - 1);
+    ctx.strokeStyle = C.grid;
     const steps = 4;
     for (let i = 0; i <= steps; i++) {
       const v = cfg.min + ((cfg.max - cfg.min) * i) / steps;

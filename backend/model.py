@@ -1,25 +1,23 @@
-"""Coupled subsystem model of a lunar rover.
+"""Coupled subsystem model of a LEO Earth-observation smallsat.
 
 The *same* equations run in two places:
 
-* ``plant.py`` - the simulated "real" rover, driven by the true (hidden) health
-  parameters plus process noise. It only talks to the ground through telemetry.
+* ``plant.py`` - the simulated "real" spacecraft, driven by the true (hidden)
+  health parameters plus process noise. It only talks to the ground through
+  telemetry during ground-station passes.
 * ``twin.py``  - the digital twin, driven by *estimated* health parameters that
   are continuously re-fitted from the telemetry stream.
 
-Subsystems and the physical links between them:
+Subsystem keys (stable wire IDs; UI labels map GNC→ADCS, MOB→PAYLOAD, DATA→OBDH):
 
     EPS   battery + solar array + loads. Battery I^2R and internal-short heat
-          feed the thermal model; bus voltage feeds sensors and the radio.
-    TCS   two-node lumped thermal model (avionics box + battery) radiating to
-          space. Temperature drives sensor noise, radio derating, battery
-          resistance and onboard thermal protection.
-    GNC   attitude knowledge from IMU + sun sensor. Attitude error drives
-          antenna pointing loss, visual-odometry compute load and drive safety.
-    COMMS link budget to the relay orbiter. Margin sets data rate, telemetry
-          cadence, command uplink and signal-search power.
-    MOB   drive power and speed, limited by SOC, temperature and attitude.
-    DATA  science buffer filled by the payload and drained by the downlink.
+          feed the thermal model; bus voltage feeds ADCS wheels and the radio.
+    TCS   two-node lumped thermal model (avionics + battery) radiating to space.
+    GNC   ADCS: IMU + sun sensor + reaction wheels. Attitude error drives
+          antenna pointing loss and payload imaging quality.
+    COMMS S-band to the ground station — only during AOS/LOS pass windows.
+    MOB   PAYLOAD: imaging duty / load, limited by SOC, temperature and pointing.
+    DATA  OBDH: science buffer filled by the payload and drained on downlink.
 """
 from __future__ import annotations
 
@@ -48,81 +46,84 @@ def clamp(v: float, lo: float, hi: float) -> float:
 @dataclass(frozen=True)
 class Params:
     # EPS
-    bat_capacity_wh: float = 600.0
+    bat_capacity_wh: float = 480.0
     bat_r0: float = 0.06
-    solar_peak_w: float = 270.0
+    solar_peak_w: float = 220.0
     charge_eff: float = 0.96
     # loads [W]
     p_avionics: float = 28.0
     p_compute: float = 8.0
-    p_compute_vo: float = 16.0
+    p_compute_vo: float = 14.0
     p_sensors: float = 10.0
     p_sensors_safe: float = 6.0
-    p_mobility_nom: float = 60.0
-    p_payload: float = 25.0
-    p_comm_hga: float = 30.0
-    p_comm_lga: float = 22.0
-    p_comm_search: float = 44.0
-    p_heater_av: float = 25.0
+    p_mobility_nom: float = 35.0
+    p_payload: float = 32.0
+    p_comm_hga: float = 28.0
+    p_comm_lga: float = 18.0
+    p_comm_search: float = 40.0
+    p_heater_av: float = 22.0
     p_heater_bat: float = 15.0
     # TCS
-    c_av: float = 3500.0
-    c_bat: float = 4500.0
-    rad_eps_area: float = 0.45
+    c_av: float = 3200.0
+    c_bat: float = 4000.0
+    rad_eps_area: float = 0.42
     g_ab: float = 1.2
     g_bat_env: float = 0.15
-    q_sun_body: float = 22.0
-    t_sink_sun: float = 250.0
-    t_sink_shade: float = 200.0
-    # GNC
-    att_floor: float = 0.25
-    att_tau: float = 150.0
+    q_sun_body: float = 28.0
+    t_sink_sun: float = 255.0
+    t_sink_shade: float = 220.0
+    # GNC / ADCS
+    att_floor: float = 0.20
+    att_tau: float = 120.0
     gyro_bias_per_c: float = 0.0025
-    # MOB
+    wheel_cap_rpm: float = 6000.0
+    # MOB / viz
     v_nom: float = 0.10
     loop_radius: float = 45.0
-    # COMMS
-    m0_db: float = 10.0
-    hga_beam_deg: float = 10.0
-    lga_gain_db: float = -24.0
-    rate_max_kbps: float = 256.0
+    # COMMS / orbit
+    m0_db: float = 12.0
+    hga_beam_deg: float = 8.0
+    lga_gain_db: float = -18.0
+    rate_max_kbps: float = 512.0
     rate_min_kbps: float = 2.0
     uplink_min_kbps: float = 1.0
     trx_b_loss_db: float = 2.5
-    uplink_bonus_db: float = 10.0
-    relay_hp_db: float = 6.0
-    relay_period_s: float = 7200.0
-    # DATA
-    buffer_cap_mb: float = 24.0
-    science_mb_s: float = 0.006
-    hk_mb_s: float = 0.00025
-    # onboard autonomy (FDIR)
+    uplink_bonus_db: float = 8.0
+    relay_hp_db: float = 5.0
+    relay_period_s: float = 5700.0
+    orbit_period_s: float = 5700.0
+    eclipse_frac: float = 0.35
+    gs_pass_frac: float = 0.14
+    gs_pass_phase: float = 0.15
+    # DATA / OBDH
+    buffer_cap_mb: float = 48.0
+    science_mb_s: float = 0.012
+    hk_mb_s: float = 0.0004
+    # FDIR
     soc_auto_safe: float = 0.18
     soc_dead: float = 0.03
     soc_revive: float = 0.08
     t_av_auto_safe: float = 72.0
     t_bat_auto_safe: float = 55.0
-    att_stop_deg: float = 10.0
-    search_after_s: float = 600.0
-    comm_loss_timer_s: float = 1800.0
+    att_stop_deg: float = 8.0
+    search_after_s: float = 400.0
+    comm_loss_timer_s: float = 500.0
+    wheel_dump_rpm: float = 5500.0
 
 
 @dataclass
 class Health:
-    """Fault-affected parameters. Truth lives in the plant, estimates in the twin."""
-
     bat_capacity_frac: float = 1.0
     bat_r_mult: float = 1.0
     bat_leak_w: float = 0.0
     rad_eff: float = 1.0
     imu_a_bias: float = 0.0
     trx_a_loss_db: float = 0.0
+    wheel_fric_mult: float = 1.0
 
 
 @dataclass
 class Config:
-    """Commandable configuration (plus onboard-autonomy overrides)."""
-
     mode: str = "NOMINAL"
     drive: bool = True
     speed_frac: float = 1.0
@@ -139,8 +140,8 @@ class Config:
 class State:
     t: float = 0.0
     soc: float = 0.80
-    t_av: float = 25.0
-    t_bat: float = 19.7
+    t_av: float = 22.0
+    t_bat: float = 18.0
     att_err: float = 0.25
     nav_err: float = 0.0
     buffer_mb: float = 2.0
@@ -156,6 +157,7 @@ class State:
     dead: bool = False
     science_mb: float = 0.0
     data_lost_mb: float = 0.0
+    wheel_rpm: float = 800.0
     cfg: Config = field(default_factory=Config)
 
     def clone(self) -> "State":
@@ -165,25 +167,51 @@ class State:
 
 
 # ---------------------------------------------------------------- environment
-def sun_elevation(t: float) -> float:
-    return math.radians(35.0 + 6.0 * math.sin(2 * math.pi * t / 21600.0))
+def orbit_state(t: float, p: Params | None = None) -> dict:
+    """LEO orbit clock: sunlit/eclipse and ground-station AOS/LOS."""
+    p = p or Params()
+    period = p.orbit_period_s
+    phase = (t % period) / period
+    angle = 2.0 * math.pi * phase
+    ecl = p.eclipse_frac
+    in_eclipse = phase < ecl * 0.5 or phase > 1.0 - ecl * 0.5
+    sunlit = not in_eclipse
+    half = p.gs_pass_frac * 0.5
+    centre = p.gs_pass_phase
+    d = min(abs(phase - centre), 1.0 - abs(phase - centre))
+    gs_pass = d <= half
+    pass_start = (centre - half) % 1.0
+    if gs_pass:
+        next_pass_s = 0.0
+    else:
+        ahead = (pass_start - phase) % 1.0
+        next_pass_s = ahead * period
+    return {
+        "angle": angle,
+        "phase": phase,
+        "sunlit": sunlit,
+        "eclipse": in_eclipse,
+        "gs_pass": gs_pass,
+        "next_pass_s": next_pass_s,
+        "beta": 0.0,
+    }
+
+
+def sun_elevation(t: float, p: Params | None = None) -> float:
+    st = orbit_state(t, p)
+    return math.radians(55.0 if st["sunlit"] else -20.0)
 
 
 def relay_range_db(t: float, p: Params) -> float:
-    return 1.5 * math.sin(2 * math.pi * t / p.relay_period_s)
+    st = orbit_state(t, p)
+    return 0.0 if st["gs_pass"] else 40.0
 
 
 def voc(soc: float) -> float:
-    """Open-circuit voltage of the 7S Li-ion pack."""
     return 22.0 + 7.0 * soc - 1.5 * math.exp(-soc / 0.06)
 
 
 def effective_battery(cfg: Config, h: Health, p: Params) -> tuple[float, float, float]:
-    """Capacity [Wh], resistance multiplier and leak [W] of the connected pack.
-
-    Isolating the faulty string leaves one healthy string: half capacity,
-    double resistance, no internal short.
-    """
     if cfg.bat_isolated:
         return 0.5 * p.bat_capacity_wh, 2.0, 0.0
     return p.bat_capacity_wh * h.bat_capacity_frac, h.bat_r_mult, h.bat_leak_w
@@ -194,13 +222,11 @@ def sink_temp(shade: float, p: Params) -> float:
 
 
 def thermal_gyro_bias(t_av: float, p: Params) -> float:
-    """Gyro bias drift caused by a hot avionics box [deg/s]."""
     return p.gyro_bias_per_c * max(0.0, t_av - 45.0)
 
 
 def link_budget(c: Config, att_err: float, t_av: float, v_bus: float, t: float,
                 trx_a_loss_db: float, p: Params) -> dict:
-    """Downlink margin [dB] at the maximum data rate and its loss terms."""
     if c.antenna == "HGA":
         gain, point = 0.0, min(80.0, 12.0 * (att_err / p.hga_beam_deg) ** 2)
     else:
@@ -208,12 +234,68 @@ def link_budget(c: Config, att_err: float, t_av: float, v_bus: float, t: float,
     trx = trx_a_loss_db if c.trx == "A" else p.trx_b_loss_db
     temp = 0.2 * max(0.0, t_av - 45.0)
     brown = -10.0 * math.log10(max(clamp((v_bus - 21.5) / 2.5, 0.0, 1.0), 0.01))
-    relay = p.relay_hp_db if c.relay_hp else 0.0
-    margin = p.m0_db + gain + relay - point - trx - temp - brown - relay_range_db(t, p)
+    gs = p.relay_hp_db if c.relay_hp else 0.0
+    margin = p.m0_db + gain + gs - point - trx - temp - brown
     return {"margin": margin, "point": point, "trx": trx, "temp": temp, "brown": brown}
 
 
-# ------------------------------------------------------------------- commands
+COMMAND_NAMES = frozenset({
+    "mode", "drive", "speed", "payload", "imu", "trx", "antenna",
+    "bat_isolated", "pose", "relay_hp",
+})
+GROUND_COMMANDS = frozenset({"relay_hp"})
+
+
+def _as_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low in ("true", "1", "yes", "on"):
+            return True
+        if low in ("false", "0", "no", "off"):
+            return False
+    raise ValueError(f"expected boolean, got {value!r}")
+
+
+def validate_command(name: str, value) -> tuple[str, object]:
+    if name not in COMMAND_NAMES:
+        raise ValueError(f"unknown command {name!r}")
+    if name == "mode":
+        if value not in ("SAFE", "NOMINAL"):
+            raise ValueError("mode must be SAFE or NOMINAL")
+        return name, value
+    if name in ("drive", "payload", "bat_isolated", "relay_hp"):
+        return name, _as_bool(value)
+    if name == "speed":
+        try:
+            v = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"speed must be a number 0..1, got {value!r}") from exc
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(f"speed must be in [0, 1], got {v}")
+        return name, v
+    if name == "imu":
+        if value not in ("A", "B"):
+            raise ValueError("imu must be A or B")
+        return name, value
+    if name == "trx":
+        if value not in ("A", "B"):
+            raise ValueError("trx must be A or B")
+        return name, value
+    if name == "antenna":
+        if value not in ("HGA", "LGA"):
+            raise ValueError("antenna must be HGA or LGA")
+        return name, value
+    if name == "pose":
+        if value not in ("NORMAL", "SUN", "SHADE"):
+            raise ValueError("pose must be NORMAL, SUN, or SHADE")
+        return name, value
+    raise ValueError(f"unknown command {name!r}")
+
+
 def enter_safe(s: State, reason: str = "") -> None:
     c = s.cfg
     c.mode, c.drive, c.payload = "SAFE", False, False
@@ -223,151 +305,167 @@ def enter_safe(s: State, reason: str = "") -> None:
 
 
 def apply_command(s: State, name: str, value) -> str:
-    """Apply a ground command to the rover configuration. Returns a summary."""
+    name, value = validate_command(name, value)
     c = s.cfg
     if name == "mode":
         if value == "SAFE":
             enter_safe(s, "")
-            return "Entered SAFE mode (drive off, payload off, face Sun)"
+            return "Entered SAFE mode (payload off, sun-pointing)"
         c.mode, c.drive, c.payload, c.pose, c.speed_frac = "NOMINAL", True, True, "NORMAL", 1.0
         s.auto_safe = ""
         return "Resumed NOMINAL operations"
     if name == "drive":
         c.drive = bool(value)
-        return "Driving " + ("enabled" if c.drive else "stopped")
+        return "Imaging " + ("enabled" if c.drive else "inhibited")
     if name == "speed":
         c.speed_frac = clamp(float(value), 0.0, 1.0)
-        return f"Drive speed set to {c.speed_frac:.0%}"
+        return f"Imaging duty set to {c.speed_frac:.0%}"
     if name == "payload":
         c.payload = bool(value)
         return "Payload " + ("on" if c.payload else "off")
     if name == "imu":
-        c.imu = "B" if value == "B" else "A"
-        return f"Navigation switched to IMU-{c.imu}"
+        c.imu = value
+        return f"ADCS switched to IMU-{c.imu}"
     if name == "trx":
-        c.trx = "B" if value == "B" else "A"
+        c.trx = value
         return f"Radio switched to transponder {c.trx}"
     if name == "antenna":
-        c.antenna = "LGA" if value == "LGA" else "HGA"
+        c.antenna = value
         return f"Antenna set to {c.antenna}"
     if name == "bat_isolated":
         c.bat_isolated = bool(value)
         return "Faulty battery string " + ("isolated" if c.bat_isolated else "reconnected")
     if name == "pose":
-        c.pose = value if value in ("NORMAL", "SUN", "SHADE") else "NORMAL"
+        c.pose = value
         if c.pose != "NORMAL":
             c.drive = False
-        return {"SUN": "Parking facing the Sun", "SHADE": "Parking in shadow"}.get(c.pose, "Normal pose")
+        return {"SUN": "Sun-pointing attitude", "SHADE": "Thermal safe attitude"}.get(c.pose, "Nadir-pointing")
     if name == "relay_hp":
         c.relay_hp = bool(value)
-        return "Relay orbiter high-gain mode " + ("on" if c.relay_hp else "off")
+        return "Ground-station high-power assist " + ("on" if c.relay_hp else "off")
     raise ValueError(f"unknown command {name!r}")
 
 
-GROUND_COMMANDS = {"relay_hp"}
-
-
-# --------------------------------------------------------------- the dynamics
 def autonomy(s: State, p: Params) -> list[str]:
-    """Onboard fault protection, evaluated on the current state."""
     ev: list[str] = []
     c = s.cfg
     if s.dead:
         if s.soc > p.soc_revive:
             s.dead = False
             enter_safe(s, "reboot after power loss")
-            ev.append("Battery recovered: avionics rebooted into SAFE mode")
+            ev.append("Battery recovered: OBDH rebooted into SAFE mode")
         return ev
     if s.soc < p.soc_dead:
         s.dead = True
-        ev.append("Battery exhausted: rover lost power")
+        ev.append("Battery exhausted: spacecraft lost power")
         return ev
     if c.mode != "SAFE":
         if s.soc < p.soc_auto_safe:
             enter_safe(s, "low battery")
-            ev.append("Autonomous SAFE mode: battery below 18%")
+            ev.append("Autonomous SAFE mode: battery below 18% — sun-pointing")
         elif s.t_av > p.t_av_auto_safe:
             enter_safe(s, "avionics over-temperature")
             ev.append("Autonomous SAFE mode: avionics over-temperature")
         elif s.t_bat > p.t_bat_auto_safe:
             enter_safe(s, "battery over-temperature")
             ev.append("Autonomous SAFE mode: battery over-temperature")
+        elif s.wheel_rpm > p.wheel_dump_rpm:
+            enter_safe(s, "momentum dump")
+            ev.append("Autonomous SAFE mode: reaction wheel near saturation — momentum dump")
     if c.drive and s.att_err > p.att_stop_deg:
         c.drive = False
-        ev.append("Attitude knowledge poor: autonomous drive halt")
+        c.payload = False
+        ev.append("Attitude knowledge poor: payload imaging inhibited")
     if s.no_contact_s > p.comm_loss_timer_s and (c.trx == "A" or c.antenna == "HGA"):
         c.trx, c.antenna = "B", "LGA"
         if c.mode != "SAFE":
             enter_safe(s, "comm-loss timer")
         s.no_contact_s = 0.0
-        ev.append("Comm-loss timer expired: switched to transponder B + low-gain antenna")
+        ev.append("Comm-loss timer expired: switched to transponder B + LGA")
     return ev
 
 
 def step(s: State, h: Health, p: Params, dt: float, terrain: float = 1.0) -> dict:
-    """Advance the rover by ``dt`` seconds (mutates ``s``) and return outputs."""
+    _ = terrain
     events = autonomy(s, p)
     c = s.cfg
     alive = not s.dead
     safe = c.mode == "SAFE"
+    orb = orbit_state(s.t, p)
 
-    # environment
-    sun_raw = max(0.0, math.sin(sun_elevation(s.t)))
-    s.shade += ((0.95 if c.pose == "SHADE" else 0.0) - s.shade) * min(1.0, dt / 240.0)
-    sun = sun_raw * (1.0 - s.shade)
+    s.shade = 1.0 if orb["eclipse"] else (0.85 if c.pose == "SHADE" else 0.0)
+    sun = 0.0 if orb["eclipse"] else 1.0
+    if c.pose == "SHADE" and sun > 0:
+        sun *= 0.15
 
-    # GNC: attitude knowledge
     brown = clamp((s.v_bus - 21.5) / 2.5, 0.0, 1.0)
     hot = max(0.0, s.t_av - 40.0) / 10.0
     noise_mult = 1.0 + hot * hot + 2.0 * (1.0 - brown)
     bias, imu_noise = (h.imu_a_bias, 1.0) if c.imu == "A" else (0.0, 1.6)
     bias += thermal_gyro_bias(s.t_av, p)
-    floor = p.att_floor * noise_mult * imu_noise
+    fric = h.wheel_fric_mult * (1.0 + 0.4 * hot)
+    wheel_power_frac = brown * (0.35 if safe else 1.0)
+    # Slow momentum accumulation so nominal flights don't dump every orbit
+    if alive and not safe:
+        s.wheel_rpm = clamp(s.wheel_rpm + (6.0 * fric - 5.0 * wheel_power_frac) * dt / 60.0,
+                            0.0, p.wheel_cap_rpm)
+    else:
+        s.wheel_rpm = max(0.0, s.wheel_rpm - 50.0 * dt / 60.0)
+    sat = clamp(s.wheel_rpm / p.wheel_cap_rpm, 0.0, 1.0)
+    wheel_cap = 1.0 - 0.7 * sat * (1.0 - brown)
+    floor = p.att_floor * noise_mult * imu_noise / max(wheel_cap, 0.15)
     s.att_err = clamp(s.att_err + (abs(bias) - (s.att_err - floor) / p.att_tau) * dt, 0.05, 60.0)
     vo = clamp((s.att_err - 2.0) / 4.0, 0.0, 1.0) if alive else 0.0
     p_compute = p.p_compute + p.p_compute_vo * vo
     p_sens = (p.p_sensors_safe if safe else p.p_sensors) if alive else 0.0
 
-    # MOB
-    v = p.v_nom * c.speed_frac if (c.drive and not safe and alive) else 0.0
+    imaging = c.drive and c.payload and not safe and alive
     lim_eps = clamp((s.soc - 0.20) / 0.10, 0.0, 1.0)
-    lim_tcs = clamp(1.0 - (s.t_av - 60.0) / 15.0, 0.3, 1.0)
-    lim_nav = clamp(1.0 - (s.att_err - 4.0) / 6.0, 0.0, 1.0)
-    v_cmd = v
-    v *= lim_eps * lim_tcs * lim_nav
-    p_mob = p.p_mobility_nom * (v / p.v_nom) * terrain
-    ds = v * dt
-    s.odometer += ds
-    s.heading = s.odometer / p.loop_radius + 0.15 * math.sin(s.odometer / 9.0)
-    s.x -= math.sin(s.heading) * ds
-    s.z -= math.cos(s.heading) * ds
-    if v > 0:
-        s.nav_err += ds * (0.01 + math.radians(s.att_err))
-    else:
-        s.nav_err *= 1.0 - min(1.0, dt / 600.0)
+    lim_tcs = clamp(1.0 - (s.t_av - 55.0) / 15.0, 0.2, 1.0)
+    lim_nav = clamp(1.0 - (s.att_err - 3.0) / 5.0, 0.0, 1.0)
+    duty_cmd = c.speed_frac if imaging else 0.0
+    duty = duty_cmd * lim_eps * lim_tcs * lim_nav
+    p_mob = p.p_mobility_nom * duty * (0.4 + 0.6 * sat)
+    s.heading = orb["angle"]
+    s.x = math.cos(orb["angle"]) * p.loop_radius
+    s.z = math.sin(orb["angle"]) * p.loop_radius
+    s.odometer += duty * dt * 0.05
+    v = duty * p.v_nom
 
-    # DATA / payload
-    payload_on = c.payload and not safe and alive and s.buffer_mb < p.buffer_cap_mb - 0.01
-    p_pay = p.p_payload if payload_on else 0.0
+    payload_on = imaging and duty > 0.05 and s.buffer_mb < p.buffer_cap_mb - 0.01
+    p_pay = p.p_payload * duty if payload_on else 0.0
 
-    # COMMS
     lb = link_budget(c, s.att_err, s.t_av, s.v_bus, s.t, h.trx_a_loss_db, p)
     point, trx_loss, temp_loss, brown_db = lb["point"], lb["trx"], lb["temp"], lb["brown"]
-    margin = lb["margin"] if alive else -99.0
-    rate = min(p.rate_max_kbps, p.rate_max_kbps * 10 ** (margin / 10.0))
-    down_ok = rate >= p.rate_min_kbps
-    up_ok = alive and p.rate_max_kbps * 10 ** ((margin + p.uplink_bonus_db) / 10.0) >= p.uplink_min_kbps
-    s.no_contact_s = 0.0 if up_ok else s.no_contact_s + dt
-    s.no_lock_s = 0.0 if (up_ok and down_ok) else s.no_lock_s + dt
+    margin_raw = lb["margin"] if alive else -99.0
+    in_pass = orb["gs_pass"] and alive
+    margin = margin_raw if in_pass else -40.0
+    rate = min(p.rate_max_kbps, p.rate_max_kbps * 10 ** (margin / 10.0)) if in_pass else 0.0
+    down_ok = in_pass and rate >= p.rate_min_kbps
+    # Uplink needs a usable margin too — severe TRX loss must close the door
+    up_ok = in_pass and margin_raw > -6.0 and (
+        p.rate_max_kbps * 10 ** ((margin_raw + p.uplink_bonus_db) / 10.0) >= p.uplink_min_kbps
+    )
+    # Contact timers only run during AOS — off-pass silence is nominal store-and-forward
+    if up_ok:
+        s.no_contact_s = 0.0
+    elif in_pass:
+        s.no_contact_s += dt
+    if up_ok and down_ok:
+        s.no_lock_s = 0.0
+    elif in_pass:
+        s.no_lock_s += dt
     searching = alive and s.no_lock_s > p.search_after_s
     if not alive:
         p_comm = 0.0
     elif searching:
         p_comm = p.p_comm_search
-    else:
+    elif in_pass:
         p_comm = p.p_comm_lga if c.antenna == "LGA" else p.p_comm_hga
+    else:
+        p_comm = 4.0
 
-    gen = (p.science_mb_s if payload_on else 0.0) + (p.hk_mb_s if alive else 0.0)
+    gen = (p.science_mb_s * duty if payload_on else 0.0) + (p.hk_mb_s if alive else 0.0)
     down = rate / 8000.0 if down_ok else 0.0
     sent = min(down * dt, s.buffer_mb + gen * dt)
     s.buffer_mb += gen * dt - sent
@@ -376,14 +474,12 @@ def step(s: State, h: Health, p: Params, dt: float, terrain: float = 1.0) -> dic
         s.buffer_mb = p.buffer_cap_mb
     s.science_mb += sent
 
-    # TCS heaters (proportional thermostats)
     q_h_av = p.p_heater_av * clamp((-5.0 - s.t_av) / 5.0, 0.0, 1.0) if alive else 0.0
     q_h_bat = p.p_heater_bat * clamp((5.0 - s.t_bat) / 5.0, 0.0, 1.0) if alive else 0.0
 
-    # EPS
     p_av = p.p_avionics + p_compute if alive else 0.0
     p_load = p_av + p_sens + p_mob + p_pay + p_comm + q_h_av + q_h_bat
-    p_sol = p.solar_peak_w * sun * (1.1 if c.pose == "SUN" else 1.0)
+    p_sol = p.solar_peak_w * sun * (1.15 if c.pose == "SUN" else 1.0)
     cap, r_mult, leak = effective_battery(c, h, p)
     r = p.bat_r0 * r_mult * math.exp(-0.025 * (s.t_bat - 25.0))
     e = voc(s.soc)
@@ -399,7 +495,6 @@ def step(s: State, h: Health, p: Params, dt: float, terrain: float = 1.0) -> dic
     s.soc = clamp(s.soc + de * dt / 3600.0 / cap, 0.0, 1.0)
     s.v_bus = v_bus
 
-    # TCS two-node thermal balance
     q_av_elec = 0.92 * (p_av + p_sens + p_comm) + 0.8 * p_pay + q_h_av
     q_sun = p.q_sun_body * sun
     t_sink = sink_temp(s.shade, p)
@@ -411,29 +506,28 @@ def step(s: State, h: Health, p: Params, dt: float, terrain: float = 1.0) -> dic
 
     s.t += dt
 
-    # how strongly each subsystem is currently pushing on the others
-    search_w = (p_comm - (p.p_comm_lga if c.antenna == "LGA" else p.p_comm_hga)) if searching else 0.0
-    # Conduction into avionics is real physics, but coupling strength for GNC/COMMS
-    # only lights when the *effect* equations engage (avionics heat / temp derate).
+    search_w = (p_comm - 4.0) if searching else 0.0
     couplings = {
-        "EPS>TCS": (clamp((loss + leak) / 30.0, 0, 1), f"{loss + leak:.0f} W battery heat"),
+        "EPS>TCS": (clamp((loss + leak) / 28.0, 0, 1), f"{loss + leak:.0f} W battery heat"),
         "TCS>EPS": (clamp((q_h_av + q_h_bat) / 25.0 + max(0.0, s.t_bat - 40.0) / 20.0, 0, 1),
                     f"heaters {q_h_av + q_h_bat:.0f} W" if q_h_av + q_h_bat > 1 else f"battery at {s.t_bat:.0f}°C"),
-        "TCS>GNC": (clamp(hot * hot / 4.0 + thermal_gyro_bias(s.t_av, p) / 0.03, 0, 1),
-                    f"gyro drift {thermal_gyro_bias(s.t_av, p):.3f}°/s, noise x{noise_mult:.1f}"),
+        "TCS>GNC": (clamp(hot * hot / 3.5 + thermal_gyro_bias(s.t_av, p) / 0.03 + 0.25 * (fric - 1.0), 0, 1),
+                    f"gyro drift {thermal_gyro_bias(s.t_av, p):.3f}°/s, wheel fric x{fric:.1f}"),
         "TCS>COMMS": (clamp(temp_loss / 5.0, 0, 1), f"-{temp_loss:.1f} dB radio derate"),
-        "TCS>MOB": (1.0 - lim_tcs, "thermal speed limit"),
-        "EPS>GNC": (clamp(2.0 * (1.0 - brown), 0, 1), f"bus {v_bus:.1f} V brownout"),
+        "TCS>MOB": (1.0 - lim_tcs, "thermal payload inhibit"),
+        "EPS>GNC": (clamp(2.0 * (1.0 - brown) + 0.8 * sat * (1.0 - brown), 0, 1),
+                    f"bus {v_bus:.1f} V — wheel torque capped"),
         "EPS>COMMS": (clamp(brown_db / 6.0, 0, 1), f"-{brown_db:.1f} dB low bus voltage"),
-        "EPS>MOB": (1.0 - lim_eps if v_cmd > 0 else 0.0, f"speed limited, SOC {s.soc:.0%}"),
-        "GNC>COMMS": (clamp(point / 10.0, 0, 1), f"-{point:.1f} dB antenna mispointing"),
-        "GNC>EPS": (vo, f"+{p.p_compute_vo * vo:.0f} W fallback compute"),
-        "GNC>MOB": (1.0 - lim_nav if v_cmd > 0 else (1.0 if s.att_err > p.att_stop_deg else 0.0),
-                    f"attitude error {s.att_err:.1f}°"),
+        "EPS>MOB": (1.0 - lim_eps if duty_cmd > 0 else (0.4 if s.soc < 0.25 else 0.0),
+                    f"payload shed, SOC {s.soc:.0%}"),
+        "GNC>COMMS": (clamp(point / 8.0, 0, 1), f"-{point:.1f} dB antenna mispointing"),
+        "GNC>EPS": (vo, f"+{p.p_compute_vo * vo:.0f} W ADCS compute"),
+        "GNC>MOB": (1.0 - lim_nav if duty_cmd > 0 else (1.0 if s.att_err > p.att_stop_deg else 0.0),
+                    f"pointing {s.att_err:.1f}° — imaging quality"),
         "COMMS>EPS": (clamp(search_w / 14.0, 0, 1), f"+{search_w:.0f} W signal search"),
         "COMMS>DATA": (clamp(s.buffer_mb / p.buffer_cap_mb, 0, 1) if not down_ok else 0.0,
-                       f"buffer {s.buffer_mb / p.buffer_cap_mb:.0%} full"),
-        "MOB>EPS": (clamp(p_mob / 600.0, 0, 1), f"drive {p_mob:.0f} W"),
+                       f"OBDH buffer {s.buffer_mb / p.buffer_cap_mb:.0%} full"),
+        "MOB>EPS": (clamp((p_mob + p_pay) / 80.0, 0, 1), f"payload+wheels {p_mob + p_pay:.0f} W"),
     }
 
     return {
@@ -446,5 +540,7 @@ def step(s: State, h: Health, p: Params, dt: float, terrain: float = 1.0) -> dic
         "temp_loss": temp_loss, "brown_db": brown_db, "trx_loss": trx_loss, "q_rad": q_rad,
         "sun": sun, "payload_on": payload_on, "innov": abs(bias), "vo": vo,
         "couplings": couplings,
+        "orbit": orb, "sunlit": orb["sunlit"], "gs_pass": orb["gs_pass"],
+        "next_pass_s": orb["next_pass_s"], "eclipse": orb["eclipse"],
+        "wheel_rpm": s.wheel_rpm, "imaging_duty": duty,
     }
-

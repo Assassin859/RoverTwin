@@ -19,23 +19,23 @@ from .model import GROUND_COMMANDS, LIMITS, Health, Params, State, apply_command
 
 PLANS = [
     {"id": "continue", "name": "Do nothing", "cmds": [],
-     "plain": "Keep going as planned and let the rover cope on its own."},
-    {"id": "safe", "name": "Safe mode, face the Sun", "cmds": [("mode", "SAFE")],
-     "plain": "Stop driving, switch off the science payload and point the solar panel at the Sun."},
-    {"id": "shed", "name": "Load-shed: payload off, half speed", "cmds": [("payload", False), ("speed", 0.5)],
-     "plain": "Switch off the science instruments and drive at half speed to save power and heat."},
+     "plain": "Keep the current configuration and wait for the next ground pass."},
+    {"id": "safe", "name": "Safe mode, sun-point", "cmds": [("mode", "SAFE")],
+     "plain": "Inhibit payload, sun-point, and wait out the anomaly."},
+    {"id": "shed", "name": "Load-shed: payload off, half duty", "cmds": [("payload", False), ("speed", 0.5)],
+     "plain": "Switch off imaging and cut ADCS/payload duty to save power and heat."},
     {"id": "isolate", "name": "Isolate faulty battery string", "cmds": [("bat_isolated", True)],
      "plain": "Disconnect the damaged half of the battery so it stops heating and draining."},
-    {"id": "shade", "name": "Park in shadow, payload off", "cmds": [("pose", "SHADE"), ("payload", False)],
-     "plain": "Stop in the shadow of a rock so the electronics can cool down."},
+    {"id": "shade", "name": "Thermal safe attitude, payload off", "cmds": [("pose", "SHADE"), ("payload", False)],
+     "plain": "Hold a cooler attitude and stop imaging so the bus can shed heat."},
     {"id": "imu_b", "name": "Switch to backup IMU-B", "cmds": [("imu", "B")],
-     "plain": "Use the spare motion sensor instead of the faulty one."},
-    {"id": "trx_b", "name": "Relay high-gain + transponder B", "cmds": [("relay_hp", True), ("trx", "B")],
-     "plain": "Ask the orbiter to listen harder, then switch the rover to its spare radio."},
+     "plain": "Use the spare IMU instead of the biased unit."},
+    {"id": "trx_b", "name": "GS high-power + transponder B", "cmds": [("relay_hp", True), ("trx", "B")],
+     "plain": "Boost the ground station and switch the spacecraft to its spare radio (next pass)."},
     {"id": "lga", "name": "Switch to low-gain antenna", "cmds": [("antenna", "LGA")],
-     "plain": "Use the small antenna that does not need precise pointing (slower data)."},
+     "plain": "Use the wide-beam antenna that needs less pointing (slower data)."},
     {"id": "resume", "name": "Resume nominal operations", "cmds": [("mode", "NOMINAL")],
-     "plain": "Go back to normal driving and science."},
+     "plain": "Return to nadir-pointing and imaging after recovery."},
 ]
 PLAN_BY_ID = {p["id"]: p for p in PLANS}
 
@@ -63,9 +63,9 @@ EVENT_RULES = [
     ("t_bat_hot", lambda s, o: s.t_bat > LIMITS["t_bat_max"], "Battery above 50°C", "crit"),
     ("t_av_hot", lambda s, o: s.t_av > LIMITS["t_av_max"], "Avionics above 70°C", "crit"),
     ("soc_low", lambda s, o: s.soc < 0.18, "Battery below 18%", "crit"),
-    ("dead", lambda s, o: s.dead, "Rover loses power", "crit"),
-    ("link_lost", lambda s, o: not o["down_ok"], "Telemetry link lost", "warn"),
-    ("buffer_full", lambda s, o: o["payload_on"] is False and s.buffer_mb > 23.9, "Data buffer full, science lost", "warn"),
+    ("dead", lambda s, o: s.dead, "Spacecraft loses power", "crit"),
+    ("link_lost", lambda s, o: not o["down_ok"] and o.get("gs_pass", True), "Telemetry link lost in pass", "warn"),
+    ("buffer_full", lambda s, o: o["payload_on"] is False and s.buffer_mb > 47.0, "Data buffer full, science lost", "warn"),
     ("att_bad", lambda s, o: s.att_err > 10, "Attitude error above 10°", "warn"),
 ]
 
@@ -158,7 +158,7 @@ def score(m: dict, p: Params, horizon: float, ser: dict | None = None, cost: flo
         notes += tn
     if m["dead"]:
         safety -= 60
-        notes.append("rover loses power")
+        notes.append("spacecraft loses power")
     if m["min_soc"] < 0.18:
         safety -= 10 + 25 * clamp((0.18 - m["min_soc"]) / 0.18, 0, 1)
         notes.append(f"battery falls to {m['min_soc']:.0%}")
@@ -169,9 +169,13 @@ def score(m: dict, p: Params, horizon: float, ser: dict | None = None, cost: flo
         safety -= min(30.0, 10 + (m["max_t_av"] - LIMITS["t_av_max"]) * 2)
         notes.append(f"avionics reach {m['max_t_av']:.0f}°C")
     comms = 25.0 * m["link_frac"]
-    if m["link_frac"] < 0.95:
-        notes.append(f"link up {m['link_frac']:.0%} of the time")
-    ret = 15.0 * clamp(0.5 * m["dist"] / (p.v_nom * horizon) + 0.5 * m["sci"] / (p.science_mb_s * horizon), 0, 1)
+    if m["link_frac"] < 0.25:
+        notes.append(f"in contact {m['link_frac']:.0%} of the time (pass windows)")
+    # Mission return: science downlink dominates over legacy "distance"
+    sci_den = max(p.science_mb_s * horizon * 0.3, 1e-6)
+    ret = 15.0 * clamp(0.2 * m["dist"] / max(p.v_nom * horizon, 1e-6) + 0.8 * m["sci"] / sci_den, 0, 1)
+    if m["sci"] > 0:
+        notes.append(f"science returned {m['sci']:.1f} MB")
     if not notes:
         notes.append("all limits respected")
     return round(max(0.0, safety) + comms + ret - cost, 1), notes
@@ -201,7 +205,7 @@ def _perturb(h: Health, s: State, unc: dict, rng: random.Random) -> tuple[Health
 
 
 def predict_all(s: State, h: Health, up_ok: bool, unc: dict, p: Params, terrain: float = 1.0,
-                horizon: float = 7200.0, members: int = 5) -> dict:
+                horizon: float = 7200.0, members: int = 5, has_findings: bool = True) -> dict:
     base = simulate(s, h, p, [], up_ok, horizon, terrain=terrain)
     rng = random.Random(int(s.t))
     ens = []
@@ -212,6 +216,33 @@ def predict_all(s: State, h: Health, up_ok: bool, unc: dict, p: Params, terrain:
     for k in ("soc", "t_av", "t_bat", "margin", "att_err"):
         cols = list(zip(base["series"][k], *[e[k] for e in ens]))
         band[k] = [[min(c), max(c)] for c in cols]
+
+    # Quiet nominal: only "Do nothing" when twin has no confirmed diagnosis
+    if not has_findings:
+        cont = next(p for p in PLANS if p["id"] == "continue")
+        sc, notes = score(base["metrics"], p, horizon, base["series"], 0.0)
+        quiet = {
+            "id": cont["id"],
+            "name": "No action needed",
+            "plain": cont["plain"],
+            "cmds": [],
+            "score": sc,
+            "notes": ["twin is nominal — no recovery needed"],
+            "metrics": base["metrics"],
+            "events": base["events"][:8],
+            "series": base["series"],
+            "delivered": None,
+            "blocked": False,
+            "needs_uplink": False,
+        }
+        crit = [e for e in base["events"] if e["level"] == "crit"]
+        return {
+            "t0": s.t, "horizon": horizon, "baseline": base["series"], "band": band,
+            "events": [e for e in base["events"] if e["key"] != "fdir"],
+            "fdir": [e for e in base["events"] if e["key"] == "fdir"][:6],
+            "first_critical": crit[0] if crit else None,
+            "plans": [quiet], "recommended": "continue",
+        }
 
     results = []
     for plan in PLANS:

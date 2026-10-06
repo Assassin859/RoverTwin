@@ -1,16 +1,15 @@
-"""The simulated physical rover and the radio link to the ground.
+"""The simulated physical spacecraft and the radio link to the ground.
 
 Nothing outside this module may read the plant's ``State`` or ``Health``
 (except the test-harness "truth" view). The twin only receives telemetry
-frames that survive the link.
+frames that survive the link during ground-station passes.
 """
 from __future__ import annotations
 
-import math
 import random
 from dataclasses import asdict, dataclass
 
-from .model import GROUND_COMMANDS, Health, Params, State, apply_command, clamp, step
+from .model import GROUND_COMMANDS, Health, Params, State, apply_command, clamp, orbit_state, step
 
 FAULTS = {
     "battery": {
@@ -19,15 +18,15 @@ FAULTS = {
     },
     "thermal": {
         "name": "Thermal stress",
-        "detail": "Dust and damaged insulation on the radiator: the avionics box can no longer shed heat.",
+        "detail": "Radiator coating degraded: the avionics box can no longer shed heat in eclipse.",
     },
     "sensor": {
         "name": "Sensor failure",
-        "detail": "IMU-A gyro develops a growing bias: the rover slowly loses track of where it is pointing.",
+        "detail": "IMU-A gyro develops a growing bias: ADCS slowly loses pointing knowledge.",
     },
     "comms": {
         "name": "Communication loss",
-        "detail": "Transponder A power amplifier fails: the radio link to the relay orbiter fades out.",
+        "detail": "Transponder A power amplifier fails: the S-band link to the ground station fades out.",
     },
 }
 
@@ -39,6 +38,7 @@ def apply_fault(h: Health, kind: str, x: float) -> None:
         h.bat_leak_w += 80.0 * x * x
     elif kind == "thermal":
         h.rad_eff *= 1.0 - 0.7 * x
+        h.wheel_fric_mult *= 1.0 + 0.5 * x
     elif kind == "sensor":
         h.imu_a_bias += 0.12 * x
     elif kind == "comms":
@@ -59,6 +59,8 @@ class Fault:
 
 
 class RoverPlant:
+    """Spacecraft plant (name kept for API stability)."""
+
     def __init__(self, p: Params, rng: random.Random):
         self.p, self.rng = p, rng
         self.s = State()
@@ -86,10 +88,7 @@ class RoverPlant:
 
     def step(self, dt: float) -> dict:
         self.h = self._health()
-        # terrain roughness: Ornstein-Uhlenbeck process on drive power
-        self.terrain += (1.0 - self.terrain) * dt / 40.0 + self.rng.gauss(0, 0.04) * math.sqrt(dt)
-        self.terrain = clamp(self.terrain, 0.6, 1.5)
-        self.o = step(self.s, self.h, self.p, dt, self.terrain)
+        self.o = step(self.s, self.h, self.p, dt, 1.0)
         self.pending_events += self.o["events"]
         return self.o
 
@@ -102,6 +101,7 @@ class RoverPlant:
         """One housekeeping frame, as measured by onboard sensors."""
         s, o, g = self.s, self.o, self.rng.gauss
         self.seq += 1
+        orb = o.get("orbit") or orbit_state(s.t, self.p)
         return {
             "seq": self.seq,
             "t": s.t,
@@ -120,15 +120,19 @@ class RoverPlant:
             "no_contact_s": s.no_contact_s, "no_lock_s": s.no_lock_s,
             "auto_safe": s.auto_safe,
             "cfg": asdict(s.cfg),
+            "sunlit": bool(o.get("sunlit", orb["sunlit"])),
+            "gs_pass": bool(o.get("gs_pass", orb["gs_pass"])),
+            "eclipse": bool(o.get("eclipse", orb["eclipse"])),
+            "orbit_angle": float(orb["angle"]),
+            "next_pass_s": float(o.get("next_pass_s", orb["next_pass_s"])),
+            "wheel_rpm": float(o.get("wheel_rpm", s.wheel_rpm)),
         }
 
 
 class RadioLink:
-    """Rover <-> relay orbiter <-> ground. Light-time plus relay latency,
-    data-rate-limited telemetry cadence, packet loss on weak links and a
-    command uplink that only works when the uplink closes."""
+    """Spacecraft <-> ground station. Pass-gated telemetry and command uplink."""
 
-    LATENCY_S = 2.6
+    LATENCY_S = 0.25
     FRAME_KBIT = 8.0
 
     def __init__(self, p: Params, rng: random.Random):
@@ -145,7 +149,7 @@ class RadioLink:
     def downlink(self, t: float, plant: RoverPlant) -> None:
         o = plant.o
         self.margin, self.rate = o["margin"], o["rate"]
-        if not o["down_ok"] or t < self.next_frame_t:
+        if not o.get("gs_pass") or not o["down_ok"] or t < self.next_frame_t:
             return
         self.next_frame_t = t + max(1.0, self.FRAME_KBIT / max(o["rate"], 1e-6))
         frame = plant.telemetry()
@@ -168,21 +172,30 @@ class RadioLink:
         return out
 
     def send_command(self, name: str, value, t: float) -> dict:
-        cmd = {"id": self.next_cmd_id, "name": name, "value": value, "sent_t": t, "status": "queued"}
+        orb = orbit_state(t, self.p)
+        cmd = {
+            "id": self.next_cmd_id, "name": name, "value": value, "sent_t": t,
+            "status": "queued", "next_pass_s": orb["next_pass_s"],
+        }
         self.next_cmd_id += 1
         if name in GROUND_COMMANDS:
             cmd["status"] = "ground"
+            cmd["next_pass_s"] = 0.0
         else:
             self.up.append(cmd)
         return cmd
 
     def deliver_commands(self, t: float, plant: RoverPlant) -> list[dict]:
+        next_pass = float(plant.o.get("next_pass_s") or orbit_state(t, self.p)["next_pass_s"])
         if not plant.o.get("up_ok"):
             for c in self.up:
-                c["status"] = "waiting for uplink"
+                mins = max(0.0, next_pass) / 60.0
+                c["status"] = f"queued until next pass in {mins:.0f} min"
+                c["next_pass_s"] = next_pass
             return []
         ready = [c for c in self.up if t - c["sent_t"] >= self.LATENCY_S]
         self.up = [c for c in self.up if c not in ready]
         for c in ready:
             c["status"] = "delivered"
+            c["next_pass_s"] = 0.0
         return ready

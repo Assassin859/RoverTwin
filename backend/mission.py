@@ -6,7 +6,7 @@ import random
 from collections import deque
 from dataclasses import asdict
 
-from .model import GROUND_COMMANDS, LIMITS, Params, apply_command
+from .model import GROUND_COMMANDS, LIMITS, Params, apply_command, validate_command
 from .plant import FAULTS, RadioLink, RoverPlant
 from .predict import PLAN_BY_ID, PLANS, predict_all
 from .store import Store
@@ -37,7 +37,7 @@ class Mission:
         self.prediction: dict | None = None
         self.pred_seq = 0
         self._pred_keys: set[str] = set()
-        self.log("SYS", "Mission start: rover exploring near the lunar south pole, relay orbiter overhead")
+        self.log("SYS", "Mission start: LEO EO smallsat — ~500 km, 95 min orbit, ground-station passes")
         if store:
             store.reset()
 
@@ -83,8 +83,12 @@ class Mission:
         )
         for st in result.get("new") or []:
             self.log("CASCADE", st["text"])
-        for st in result.get("retracted") or []:
-            self.log("CASCADE", f"Retracted: {st['text']}")
+        for st in result.get("resolved") or result.get("retracted") or []:
+            if st.get("kind") == "recovery":
+                self.log("CASCADE", st["text"])
+            elif st.get("resolved"):
+                text = st.get("text") or ""
+                self.log("CASCADE", text if text.startswith("Resolved:") else f"Resolved: {text}")
         if self.t - self._last_hist >= HISTORY_DT:
             self._last_hist = self.t
             sample = self.sample()
@@ -111,10 +115,7 @@ class Mission:
             self.log("FAULT", f"[test harness] Cleared {FAULTS[kind]['name'].lower()}")
 
     def command(self, name: str, value, source: str = "operator") -> dict:
-        allowed = {"mode", "drive", "speed", "payload", "imu", "trx", "antenna",
-                   "bat_isolated", "pose", "relay_hp"}
-        if name not in allowed:
-            raise ValueError(f"unknown command {name!r}")
+        name, value = validate_command(name, value)
         cmd = self.link.send_command(name, value, self.t)
         if name in GROUND_COMMANDS:
             apply_command(self.plant.s, name, value)
@@ -139,10 +140,14 @@ class Mission:
     # ------------------------------------------------------------ prediction
     def prediction_inputs(self) -> tuple:
         tw = self.twin
-        return (tw.s.clone(), copy.copy(tw.h), bool(tw.o.get("up_ok")), dict(tw.unc), self.p, tw.terrain)
+        has = any(not f.get("contained") for f in tw.confirmed_findings())
+        return (tw.s.clone(), copy.copy(tw.h), bool(tw.o.get("up_ok")), dict(tw.unc), self.p, tw.terrain, has)
 
     @staticmethod
     def compute_prediction(inputs: tuple) -> dict:
+        if len(inputs) >= 7:
+            s, h, up_ok, unc, p, terrain, has = inputs[:7]
+            return predict_all(s, h, up_ok, unc, p, terrain, has_findings=has)
         return predict_all(*inputs)
 
     def set_prediction(self, pred: dict) -> None:
@@ -196,13 +201,24 @@ class Mission:
                 "lost": tw.lost + self.link.dropped, "rate": tw.last_rate, "seq": f["seq"] if f else 0,
                 "latency": RadioLink.LATENCY_S,
             },
-            "link": {"margin": self.link.margin, "rate": self.link.rate},
+            "link": {
+                "margin": self.link.margin, "rate": self.link.rate,
+                "gs_pass": bool(tw.o.get("gs_pass")),
+                "next_pass_s": float(tw.o.get("next_pass_s") or 0.0),
+                "sunlit": bool(tw.o.get("sunlit", True)),
+                "eclipse": bool(tw.o.get("eclipse", False)),
+            },
             "subsystems": tw.subsystems(), "findings": tw.confirmed_findings(),
             "residuals": {k: round(v, 2) for k, v in tw.z.items()},
+            "estimator": dict(tw.n_est),
             "anomalies": sorted(tw.active_anoms),
             "couplings": {k: [round(v[0], 3), v[1]] for k, v in tw.o["couplings"].items()},
             "correlations": tw.correlations(),
-            "cascade_chain": self.cascade.snapshot(tw.o.get("couplings") or {}),
+            "cascade_chain": self.cascade.snapshot(
+                tw.o.get("couplings") or {},
+                tw.confirmed_findings(),
+                tw.subsystems(),
+            ),
             "prognostics": tw.prognostics(),
             "faults": [{"kind": k, "severity": fl.severity, "level": fl.level(self.t)}
                        for k, fl in self.plant.faults.items()],

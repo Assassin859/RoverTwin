@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>RoverTwin · Mission Digital Twin for Predictive Fault Simulation</title>
-<meta name="description" content="A telemetry-synchronised digital twin of a lunar rover — not a dashboard. Fault injection, cascading-failure propagation, prediction and recovery simulation.">
+<meta name="description" content="A telemetry-synchronised digital twin of a LEO Earth-observation smallsat — not a dashboard. Fault injection, cascading-failure propagation, prediction and recovery simulation.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;800&family=Rajdhani:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/style.css">
@@ -28,13 +28,13 @@
     <div class="hero">
       <div class="tag">TECHFEST 2026–27 · ST-09 · Satellite-ops digital twin</div>
       <h1>ROVER<br>TWIN</h1>
-      <p class="lead">A <b>spacecraft digital twin</b> for satellite operations: lunar surface asset + relay satellite, coupled EPS / TCS / ADCS / COMMS. Not a dashboard of canned plots — inject faults, watch cause→effect cascades, predict impact, and rank recovery before uplink.</p>
+      <p class="lead">A <b>spacecraft digital twin</b> for LEO satellite operations: Earth-observation smallsat (~95 min orbit, eclipse + ground passes), coupled EPS / TCS / ADCS / COMMS / PAYLOAD / OBDH. Not a dashboard of canned plots — inject faults, watch cause→effect cascades, predict impact, and rank recovery before the next pass.</p>
       <ul class="how">
-        <li><b>MIRROR</b>Same physics model as the rover; corrected by telemetry.</li>
-        <li><b>SYNC</b>2.6 s latency, lossy/rate-limited; SYNCED / LOW RATE / BLIND — predicts through blackout.</li>
+        <li><b>MIRROR</b>Same physics model as the spacecraft; corrected by telemetry.</li>
+        <li><b>SYNC</b>Pass-gated link; SYNCED / LOW RATE / BLIND — predicts through eclipse.</li>
         <li><b>BREAK</b>Battery, thermal, sensor or radio faults, alone or together.</li>
         <li><b>PREDICT</b>Root cause + 2-hour forecast with ensemble bands.</li>
-        <li><b>RECOVER</b>Every option simulated and scored before uplink.</li>
+        <li><b>RECOVER</b>Every option simulated and scored before the next uplink pass.</li>
       </ul>
       <div class="ctas">
         <button class="cta" id="goGuide">3-MIN JUDGE PATH</button>
@@ -51,6 +51,7 @@
     <span class="met" id="met">MET 00:00:00</span>
     <span class="pill" id="syncPill" title="Twin sync to telemetry (not a live plant read)"><span class="dot"></span><span id="syncTxt">INIT</span><small id="syncSub"></small></span>
     <span class="pill" id="modePill"><span class="dot"></span><span id="modeTxt">NOMINAL</span></span>
+    <span id="orbitStrip" class="orbit-strip">Orbit…</span>
     <span class="spacer"></span>
     <div class="seg" id="speed" aria-label="Simulation speed">
       <button data-v="pause" title="Pause / resume">II</button>
@@ -62,6 +63,14 @@
     <button class="tbtn" id="resetBtn">Reset</button>
     <a class="tbtn" href="/docs" target="_blank" rel="noopener">API</a>
   </header>
+
+  <div id="critBanner" class="crit-banner hidden" role="alert">
+    <span class="crit-msg">PAUSED — critical forecast</span>
+    <button type="button" class="cta" id="critResume">Resume</button>
+  </div>
+  <div id="replayBanner" class="replay-banner hidden" role="status">
+    Live backend offline — playing recorded mission
+  </div>
 
   <main class="grid">
     <aside class="col left">
@@ -91,7 +100,7 @@
       <div class="panel view" id="view">
         <div class="view-overlay" id="viewChips"></div>
         <div class="ticker" id="ticker"></div>
-        <div class="view-legend">Drag to orbit · scroll to zoom</div>
+        <div class="view-legend">Drag to orbit · scroll to zoom · Earth LEO</div>
       </div>
       <div class="panel charts" id="chartsPanel">
         <div class="charts-grid">
