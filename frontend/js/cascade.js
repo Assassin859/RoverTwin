@@ -4,7 +4,7 @@ import { edgeTooltip } from "./edges.js";
 
 const NODES = {
   EPS: [80, 52, "POWER"], TCS: [260, 30, "THERMAL"], COMMS: [440, 52, "COMMS"],
-  GNC: [260, 112, "NAV / GNC"], MOB: [80, 165, "MOBILITY"], DATA: [440, 165, "DATA"],
+  GNC: [260, 112, "GNC/ADCS"], MOB: [80, 165, "MOBILITY"], DATA: [440, 165, "DATA"],
 };
 const STATUS_COLOR = { NOMINAL: "#3ecf6a", WATCH: "#ffb02e", WARNING: "#ff7a3d", CRITICAL: "#ff4d3a" };
 const NS = "http://www.w3.org/2000/svg";
@@ -21,8 +21,9 @@ export class Cascade {
     this.svg = svg;
     this.edges = {};
     this.nodes = {};
+    this.highlight = new Set();
     const defs = el("defs", {}, svg);
-    for (const [id, c] of [["g", "#4a3f35"], ["a", "#ffb02e"], ["r", "#ff4d3a"]]) {
+    for (const [id, c] of [["g", "#4a3f35"], ["a", "#ffb02e"], ["r", "#ff4d3a"], ["h", "#ff9933"]]) {
       const m = el("marker", { id: "arw-" + id, viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 5, markerHeight: 5, orient: "auto-start-reverse" }, defs);
       el("path", { d: "M0,0 L10,5 L0,10 z", fill: c }, m);
     }
@@ -33,11 +34,15 @@ export class Cascade {
       const g = el("g", { class: "node", transform: `translate(${x},${y})` }, this.gNodes);
       const ring = el("circle", { class: "ring", r: 25, stroke: STATUS_COLOR.NOMINAL }, g);
       const t = el("text", { y: -2 }, g);
-      t.textContent = label.length > 7 ? label.split(" ")[0] : label;
+      t.textContent = label.length > 8 ? label.split("/")[0] : label;
       const s = el("text", { class: "sc", y: 11 }, g);
       s.textContent = "100";
       this.nodes[id] = { ring, s };
     }
+  }
+
+  setHighlight(keys) {
+    this.highlight = new Set(keys || []);
   }
 
   _edge(key) {
@@ -60,21 +65,31 @@ export class Cascade {
     return (this.edges[key] = { path, tip, tip2, lg, bg, tx, cx, cy });
   }
 
-  update(couplings, subsystems) {
+  update(couplings, subsystems, activeKeys) {
+    const active = new Set(activeKeys || []);
+    const hi = this.highlight.size ? this.highlight : active;
+    const hasFocus = hi.size > 0;
+
     for (const [key, [s, label]] of Object.entries(couplings || {})) {
       const e = this._edge(key);
-      const lvl = s < 0.12 ? "g" : s < 0.5 ? "a" : "r";
-      const color = { g: "#4a3f35", a: "#ffb02e", r: "#ff4d3a" }[lvl];
+      const onPath = hi.has(key);
+      const lvl = onPath ? "h" : s < 0.12 ? "g" : s < 0.5 ? "a" : "r";
+      const color = { g: "#4a3f35", a: "#ffb02e", r: "#ff4d3a", h: "#ff9933" }[lvl];
       e.path.setAttribute("stroke", color);
-      e.path.setAttribute("stroke-width", (1 + 4 * s).toFixed(2));
-      e.path.setAttribute("opacity", (0.35 + 0.65 * Math.min(1, s * 2)).toFixed(2));
+      e.path.setAttribute("stroke-width", (onPath ? 2.5 + 4 * s : 1 + 4 * s).toFixed(2));
+      let op = 0.35 + 0.65 * Math.min(1, s * 2);
+      if (hasFocus && !onPath) op *= 0.22;
+      if (onPath) op = Math.max(op, 0.95);
+      e.path.setAttribute("opacity", op.toFixed(2));
       e.path.setAttribute("marker-end", `url(#arw-${lvl})`);
-      e.path.classList.toggle("flow", s >= 0.12);
+      e.path.classList.toggle("flow", s >= 0.12 || onPath);
+      e.path.classList.toggle("path", onPath);
       const tip = edgeTooltip(key, label);
       e.tip.textContent = tip;
       e.tip2.textContent = tip;
-      const show = s >= 0.2;
+      const show = s >= 0.2 || onPath;
       e.lg.style.display = show ? "" : "none";
+      e.lg.style.opacity = hasFocus && !onPath ? "0.25" : "1";
       if (show && e.tx.textContent !== label) {
         e.tx.textContent = label;
         const w = e.tx.getComputedTextLength() + 8;

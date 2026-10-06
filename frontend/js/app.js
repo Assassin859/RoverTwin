@@ -2,13 +2,18 @@ import { TwinScene } from "./scene.js";
 import { Chart, CHARTS, chartLegend } from "./charts.js";
 import { Cascade } from "./cascade.js";
 import { Guide } from "./guide.js";
+import { EDGE_EQ } from "./edges.js";
 
 const $ = (id) => document.getElementById(id);
-export const S = { meta: null, snap: null, history: [], events: [], pred: null, truth: false, preview: null, connected: false, allPlans: false, pauseOnCritical: true };
+export const S = { meta: null, snap: null, history: [], events: [], pred: null, truth: false, preview: null, connected: false, allPlans: false, pauseOnCritical: true, highlightEdges: null, llmKey: "" };
 export const bus = new EventTarget();
 const emit = (type, detail) => bus.dispatchEvent(new CustomEvent(type, { detail }));
 let lastAnoms = "";
 let pausedCritKey = null;
+let llmTimer = null;
+let llmBusy = false;
+const SUBS_ORDER = ["EPS", "TCS", "GNC", "COMMS", "MOB", "DATA"];
+const MATRIX_LABEL = { EPS: "P", TCS: "T", GNC: "G", COMMS: "C", MOB: "M", DATA: "D" };
 
 const ICON = { battery: "🔋", thermal: "🌡️", sensor: "🧭", comms: "📡" };
 const SHORT_FAULT = { battery: "Battery", thermal: "Overheat", sensor: "Sensor", comms: "Radio" };
@@ -200,6 +205,8 @@ function tileTag(s) {
   if (s.root) return `<div class="tagline root">ROOT CAUSE</div>`;
   if (!s.cause) return "";
   if (s.cause.startsWith("fault contained")) return `<div class="tagline ok">contained</div>`;
+  const via = (s.cause.match(/via ([^:]+)/) || [])[1];
+  if (via) return `<div class="tagline knock" title="${esc(s.cause)}">via ${esc(via.trim())}</div>`;
   const src = (s.cause.match(/from (\w+)/) || [])[1];
   return `<div class="tagline knock">hit by ${SUB_NAME[src] || src}</div>`;
 }
@@ -252,6 +259,7 @@ function render() {
   patch($("diag"), (sn.findings.length
     ? sn.findings.map((f) => `<div class="diag-item${f.contained ? " contained" : ""}">${esc(f.text)}<small>${SUB_NAME[f.sub]} · ${pct(f.conf)} sure${f.contained ? ` · contained: ${esc(f.contained)}` : ""}</small></div>`).join("")
     : `<div class="diag-none">Nothing wrong. Every telemetry frame matches the twin's model.</div>`)
+    + `<div class="note">Knock-ons are correlated through the live model edges — not separate gauges.</div>`
     + (batFound ? `<div class="note">Battery outlook: ${pct(pr.capacity)} capacity, ${progTail}.</div>` : ""));
 
   // residuals
@@ -270,7 +278,13 @@ function render() {
   }
   if (!anoms.size) lastAnoms = "";
 
-  cascade.update(sn.couplings, sn.subsystems);
+  const corr = sn.correlations || { matrix: {}, paths: [], active: [] };
+  const hi = S.highlightEdges || corr.active;
+  cascade.setHighlight(S.highlightEdges);
+  cascade.update(sn.couplings, sn.subsystems, corr.active);
+  renderCorrTable(corr, hi);
+  renderCorrMatrix(corr.matrix, hi);
+  scheduleExplain(sn, corr);
 
   // view chips
   const chips = [
@@ -314,6 +328,98 @@ function estimatesTable(est, tru, cfg) {
   return `<table class="est"><tr><th>Health parameter</th><th>Twin estimate</th><th>Truth</th></tr>${rows.map(([n, e, t, tol, f]) =>
     `<tr><td style="font-family:inherit">${n}</td><td class="${ok(e, t, tol) ? "ok" : "off"}">${f(e)}</td><td>${f(t)}</td></tr>`).join("")}</table>
     <div class="note">Truth is hidden from the twin: it only sees telemetry. ${cfg.bat_isolated ? "Battery parameters frozen while string 2 is isolated." : ""}</div>`;
+}
+
+function renderCorrTable(corr, hi) {
+  const paths = corr.paths || [];
+  const hiSet = new Set(hi || []);
+  if (!paths.length) {
+    patch($("corrTable"), `<div class="note">No active root-cause paths. Inject a fault to light cause→effect correlations.</div>`);
+    return;
+  }
+  const rows = paths.slice(0, 8).map((p) => {
+    const edges = p.edges || [];
+    const chain = [p.from, ...(p.via || []), p.to].map((x) => SUB_NAME[x] || x).join(" → ");
+    const on = edges.length && edges.every((e) => hiSet.has(e));
+    const eq = EDGE_EQ[edges[edges.length - 1]] || "";
+    return `<tr data-edges="${esc(edges.join("|"))}" class="${on ? "on" : ""}">
+      <td>${esc(SUB_NAME[p.from] || p.from)}</td>
+      <td>${esc(chain)}</td>
+      <td class="str">${p.strength.toFixed(2)}</td>
+      <td class="eq" title="${esc(eq)}">${esc(p.label)}</td></tr>`;
+  }).join("");
+  patch($("corrTable"), `<table><thead><tr><th>Root</th><th>Path</th><th>Str</th><th>Effect</th></tr></thead><tbody>${rows}</tbody></table>`);
+}
+
+function renderCorrMatrix(matrix, hi) {
+  const hiSet = new Set(hi || []);
+  if (!matrix || !Object.keys(matrix).length) {
+    patch($("corrMatrix"), "");
+    return;
+  }
+  const cells = [`<div class="mh"></div>` + SUBS_ORDER.map((b) => `<div class="mh">${MATRIX_LABEL[b]}</div>`).join("")];
+  for (const a of SUBS_ORDER) {
+    cells.push(`<div class="mh">${MATRIX_LABEL[a]}</div>`);
+    for (const b of SUBS_ORDER) {
+      const s = matrix[a]?.[b] || 0;
+      const key = `${a}>${b}`;
+      const hot = s >= 0.12;
+      const alpha = Math.min(1, s);
+      const bg = hot ? `rgba(255,153,51,${0.15 + 0.75 * alpha})` : "rgba(255,255,255,.04)";
+      cells.push(`<div class="cell${hiSet.has(key) ? " on" : ""}${hot ? " hot" : ""}" data-edge="${key}" style="background:${bg}" title="${key} · ${s.toFixed(2)}">${hot ? s.toFixed(1) : ""}</div>`);
+    }
+  }
+  patch($("corrMatrix"), `<div style="display:grid;grid-template-columns:18px repeat(6,1fr);gap:1px">${cells.join("")}</div>`);
+}
+
+function scheduleExplain(sn, corr) {
+  const key = JSON.stringify({
+    f: (sn.findings || []).map((x) => x.id + (x.contained || "")),
+    a: corr.active || [],
+  });
+  if (key === S.llmKey) return;
+  S.llmKey = key;
+  clearTimeout(llmTimer);
+  llmTimer = setTimeout(() => fetchExplain(false), 2500);
+}
+
+async function fetchExplain(manual) {
+  if (llmBusy) return;
+  llmBusy = true;
+  const note = $("llmNote");
+  if (note) {
+    note.classList.add("busy");
+    note.textContent = manual ? "Asking local qwen2.5:3b…" : "Updating operator note…";
+  }
+  try {
+    const r = await fetch("/api/llm/explain", { method: "POST" });
+    const j = await r.json();
+    if (note) {
+      note.classList.remove("busy");
+      note.textContent = j.text || "No explanation.";
+    }
+    const badge = $("llmBadge");
+    if (badge) badge.textContent = j.ok ? `local ${j.model}` : (j.text?.startsWith("Ollama") ? "Ollama offline" : `local ${j.model || "llm"} (fallback)`);
+  } catch {
+    if (note) {
+      note.classList.remove("busy");
+      note.textContent = "Could not reach /api/llm/explain — twin correlations still work without the LLM.";
+    }
+  } finally {
+    llmBusy = false;
+  }
+}
+
+async function refreshLlmStatus() {
+  try {
+    const j = await (await fetch("/api/llm/status")).json();
+    const badge = $("llmBadge");
+    if (!badge) return;
+    badge.textContent = j.ok && j.model_ready ? `Ollama ready · ${j.model}` : j.ok ? `Ollama up · pull ${j.model}` : "Ollama offline — correlations still work";
+  } catch {
+    const badge = $("llmBadge");
+    if (badge) badge.textContent = "Ollama offline — correlations still work";
+  }
 }
 
 function drawCharts() {
@@ -401,9 +507,24 @@ $("goConsole").onclick = showConsole;
 $("goGuide").onclick = () => { showConsole(); guide.start(); };
 $("home").onclick = showLanding;
 $("guideBtn").onclick = () => guide.start();
-$("resetBtn").onclick = () => { pausedCritKey = null; send("reset"); };
+$("resetBtn").onclick = () => { pausedCritKey = null; S.llmKey = ""; S.highlightEdges = null; send("reset"); };
 $("truth").onchange = (e) => { S.truth = e.target.checked; render(); };
 $("pauseCrit").onchange = (e) => { S.pauseOnCritical = e.target.checked; if (!e.target.checked) pausedCritKey = null; };
+$("explainBtn").onclick = () => { S.llmKey = ""; fetchExplain(true); };
+$("corrTable").addEventListener("click", (e) => {
+  const tr = e.target.closest("tr[data-edges]");
+  if (!tr) return;
+  const edges = tr.dataset.edges.split("|").filter(Boolean);
+  S.highlightEdges = S.highlightEdges && edges.join() === S.highlightEdges.join() ? null : edges;
+  render();
+});
+$("corrMatrix").addEventListener("click", (e) => {
+  const c = e.target.closest("[data-edge]");
+  if (!c) return;
+  const key = c.dataset.edge;
+  S.highlightEdges = S.highlightEdges && S.highlightEdges[0] === key && S.highlightEdges.length === 1 ? null : [key];
+  render();
+});
 $("speed").onclick = (e) => {
   const b = e.target.closest("button");
   if (!b) return;
@@ -413,4 +534,5 @@ $("speed").onclick = (e) => {
 
 const guide = new Guide({ S, bus, send, showConsole });
 addEventListener("resize", drawCharts);
+refreshLlmStatus();
 connect();

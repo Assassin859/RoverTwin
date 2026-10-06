@@ -177,6 +177,7 @@ class Mission:
             "residuals": {k: round(v, 2) for k, v in tw.z.items()},
             "anomalies": sorted(tw.active_anoms),
             "couplings": {k: [round(v[0], 3), v[1]] for k, v in tw.o["couplings"].items()},
+            "correlations": tw.correlations(),
             "prognostics": tw.prognostics(),
             "faults": [{"kind": k, "severity": fl.severity, "level": fl.level(self.t)}
                        for k, fl in self.plant.faults.items()],

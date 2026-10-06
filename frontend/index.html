@@ -26,9 +26,9 @@
       <div class="tri"></div>
     </div>
     <div class="hero">
-      <div class="tag">TECHFEST 2026–27 · ST-09 · Mission Digital Twin for Predictive Fault Simulation</div>
+      <div class="tag">TECHFEST 2026–27 · ST-09 · Satellite-ops digital twin (lunar rover + relay)</div>
       <h1>ROVER<br>TWIN</h1>
-      <p class="lead">A <b>telemetry-synchronised digital twin</b> of a Moon rover — not a dashboard of canned plots. It runs the same physics as the rover, corrects itself with every delayed radio frame, lets you inject faults, shows how they cascade, and ranks recovery plans before a command is sent.</p>
+      <p class="lead">A <b>telemetry-synchronised spacecraft digital twin</b> of a Moon rover + relay orbiter — not a dashboard of canned plots. Same satellite-ops problem (EPS / TCS / GNC·ADCS / COMMS): inject faults, see cause→effect cascades through the model, predict impact, and rank recovery before uplink.</p>
       <ul class="how">
         <li><b>MIRROR</b>Same physics model as the rover; corrected by telemetry.</li>
         <li><b>BREAK</b>Battery, thermal, sensor or radio faults, alone or together.</li>
@@ -66,14 +66,23 @@
     <aside class="col left">
       <div class="panel" id="subsPanel"><h3>HEALTH <small>as the twin sees it</small></h3><div id="subs" class="subs-grid"></div></div>
       <div class="panel" id="diagPanel"><h3>WHAT'S WRONG <small>found by the twin</small></h3><div id="diag"></div></div>
+      <div class="panel" id="notePanel">
+        <h3>OPERATOR NOTE <small>local qwen2.5:3b · twin facts only</small>
+          <button class="tbtn" id="explainBtn" type="button" style="margin-left:auto;padding:2px 8px;font-size:11px">Explain</button>
+        </h3>
+        <div id="llmBadge" class="note">Checking Ollama…</div>
+        <div id="llmNote" class="llm-note">Inject a fault to see a grounded cause→effect narration.</div>
+      </div>
     </aside>
 
     <section class="col center">
       <div class="row2">
         <div class="panel" id="cascadePanel">
-          <h3>HOW IT SPREADS <small>live, from the model</small></h3>
+          <h3>HOW IT SPREADS <small>live correlations from the model</small></h3>
           <svg id="cascade" viewBox="0 0 520 200" preserveAspectRatio="xMidYMid meet"></svg>
-          <div class="cascade-cap">Edges = live equations from the model · hover an arrow for the formula</div>
+          <div class="cascade-cap">Edges = live equations · lit path = root cause → effects · click a row below</div>
+          <div id="corrTable" class="corr-table"></div>
+          <div id="corrMatrix" class="corr-matrix" title="Live 6×6 coupling strengths"></div>
         </div>
         <div class="panel" id="impactPanel"><h3>WHAT HAPPENS NEXT <small>2 h forecast if nothing is done</small></h3><div id="impact"></div></div>
       </div>

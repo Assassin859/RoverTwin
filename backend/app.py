@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from .mission import Mission
 from .plant import FAULTS
 from .store import Store
+from . import llm as llm_mod
 
 ROOT = Path(__file__).resolve().parent.parent
 TICK_S = 0.1
@@ -243,6 +244,19 @@ async def post_reset() -> dict:
     hub.reset()
     await hub.broadcast(hub.hello())
     return {"ok": True}
+
+
+@app.get("/api/llm/status", summary="Whether local Ollama and the configured model are available")
+def llm_status() -> dict:
+    return llm_mod.status()
+
+
+@app.post("/api/llm/explain", summary="Plain-language cause→effect note grounded on twin correlations")
+async def llm_explain() -> dict:
+    snap = hub.mission.snapshot()
+    pred = hub.mission.prediction
+    ctx = llm_mod.build_context(snap, pred)
+    return await asyncio.to_thread(llm_mod.explain, ctx)
 
 
 @app.get("/api/telemetry", summary="Received telemetry frames from the time-series store")

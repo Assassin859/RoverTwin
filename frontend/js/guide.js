@@ -137,7 +137,7 @@ export class Guide {
         <div class="cards">${Object.entries(STORY).map(([k, s]) => `
           <button class="card" data-fault="${k}"><span class="ic">${s.icon}</span><b>${s.name}</b><span>${s.analogy}</span></button>`).join("")}</div>`);
     } else if (step === "cascade") {
-      this.spot(["cascadePanel", "diagPanel"]);
+      this.spot(["cascadePanel", "diagPanel", "notePanel"]);
       this.renderCascade();
     } else if (step === "predict") {
       this.send("pause", { value: true });
@@ -174,9 +174,17 @@ export class Guide {
 
   renderCascade() {
     const ready = this.readyAt != null;
+    const corr = this.S.snap?.correlations;
+    const pathLine = (corr?.paths || []).length
+      ? `Follow the lit path: ${(corr.paths[0].edges || []).join(" → ")} (cause → next → next…).`
+      : "Follow the lit path: cause → next → next… when edges light up.";
+    const llm = document.getElementById("llmBadge")?.textContent || "";
+    const llmLine = llm.includes("ready") || llm.includes("local qwen")
+      ? " OPERATOR NOTE (local LLM) narrates the same twin facts — it does not invent physics."
+      : "";
     this.render(`<div class="step"><span>4 / 6 · CASCADE</span><span>${STORY[this.kind].icon} ${STORY[this.kind].name}</span></div>
       <h2>Watch the fault spread</h2>
-      <p>Arrows light up when one subsystem pushes another — each edge is an equation, not an animation.</p>
+      <p>${pathLine} Table + 6×6 matrix list every live correlation; each edge is an equation.${llmLine}</p>
       <ul class="narr">${this.narr.slice(-6).map((n) => `<li class="${n.c}">${esc(n.t)}</li>`).join("") || "<li>Fault injected. Waiting for the effects to show up…</li>"}</ul>
       <div class="row">${ready ? `<button class="cta" data-a="next">SEE THE PREDICTION</button>` : `<span class="note">Running at 60× speed…</span>`}</div>`);
   }

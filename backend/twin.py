@@ -29,6 +29,7 @@ from .model import (
     GROUND_COMMANDS, K0, LIMITS, SIGMA, Config, Health, Params, State, apply_command, clamp,
     link_budget, sink_temp, step, sun_elevation, thermal_gyro_bias, voc,
 )
+from .correlate import correlations as build_correlations, knock_on_cause
 
 LATENCY_S = 2.6
 EST_EVERY = 5
@@ -396,9 +397,7 @@ class DigitalTwin:
             if sub in contained and sub not in roots:
                 cause = f"fault contained: {contained[sub]}"
             elif sub not in roots and score < 80:
-                best = max(((v[0], k, v[1]) for k, v in o["couplings"].items() if k.endswith(">" + sub)), default=None)
-                if best and best[0] > 0.1:
-                    cause = f"knock-on from {best[1].split('>')[0]}: {best[2]}"
+                cause = knock_on_cause(sub, o["couplings"], roots)
             out.append({"id": sub, "score": round(score), "status": status_of(score),
                         "root": sub in roots, "cause": cause})
         return out
@@ -409,6 +408,9 @@ class DigitalTwin:
         cap = 0.5 if s.cfg.bat_isolated else h.bat_capacity_frac
         days = max(0.0, (cap - 0.5) / fade_per_day) if cap > 0.5 else 0.0
         return {"capacity": cap, "fade_pct_day": fade_per_day * 100, "rul_days": days}
+
+    def correlations(self) -> dict:
+        return build_correlations(self.o.get("couplings") or {}, self.findings())
 
     # --------------------------------------------------------------- snapshot
     def view(self) -> dict:

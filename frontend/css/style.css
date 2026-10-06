@@ -102,10 +102,27 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 .tk.PRED { border-color: var(--amb); }
 .tk.SYNC { border-color: #fff; }
 @keyframes tkfade { 0%, 75% { opacity: 1; } 100% { opacity: 0; } }
-.row2 { flex: none; height: clamp(170px, 25vh, 250px); display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 8px; }
+.row2 { flex: none; height: clamp(240px, 36vh, 340px); display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 8px; }
 .row2 .panel { overflow: hidden; display: flex; flex-direction: column; }
 #cascade { flex: 1; width: 100%; min-height: 0; }
 .cascade-cap { flex: none; font-size: 11px; color: var(--dim); margin-top: 4px; letter-spacing: .02em; }
+.corr-table { flex: none; max-height: 108px; overflow-y: auto; margin-top: 6px; font-size: 12px; }
+.corr-table table { width: 100%; border-collapse: collapse; }
+.corr-table th, .corr-table td { text-align: left; padding: 3px 4px; border-bottom: 1px solid var(--ln2); }
+.corr-table th { color: var(--dim); font-weight: 600; font-size: 10px; letter-spacing: .06em; }
+.corr-table tr { cursor: pointer; }
+.corr-table tr:hover, .corr-table tr.on { background: rgba(255,153,51,.12); }
+.corr-table .str { font-family: var(--mono); color: var(--saf); }
+.corr-table .eq { color: var(--dim); font-size: 11px; }
+.corr-matrix { flex: none; margin-top: 6px; display: grid; gap: 1px; font-size: 9px; font-family: var(--mono); }
+.corr-matrix .mh { color: var(--dim); text-align: center; padding: 1px; }
+.corr-matrix .cell { height: 16px; border-radius: 2px; background: rgba(255,255,255,.04); cursor: pointer; text-align: center; line-height: 16px; color: transparent; }
+.corr-matrix .cell.on { outline: 1px solid var(--saf); }
+.corr-matrix .cell.hot { color: #1a0f06; }
+#notePanel h3 { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.llm-note { font-size: 14px; line-height: 1.35; color: #e6dbcf; min-height: 3.2em; white-space: pre-wrap; }
+.llm-note.busy { color: var(--mut); font-style: italic; }
+.edge.path { filter: drop-shadow(0 0 3px rgba(255,153,51,.7)); }
 .charts { flex: none; height: clamp(140px, 20vh, 220px); padding: 8px; display: flex; flex-direction: column; gap: 4px; }
 .charts-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .chart-legend { flex: none; font-size: 12px; color: var(--dim); text-align: center; }
