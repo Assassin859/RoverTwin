@@ -13,13 +13,19 @@ def test_prognostics_clamps_capacity_and_gates_rul():
     assert pr["rul_days"] is None
     assert pr["rul_ready"] is False
 
-    tw.n_est["cap"] = 25
+    tw.n_est["cap"] = 12
     tw.h.bat_capacity_frac = 0.9
     pr2 = tw.prognostics()
     assert pr2["capacity"] == 0.9
     assert pr2["rul_days"] is not None
     assert pr2["rul_days"] <= 3650
     assert pr2["rul_ready"] is True
+
+    tw.n_est["cap"] = 10
+    assert tw.prognostics()["rul_ready"] is True
+    tw.n_est["cap"] = 9
+    tw._fade_ewma = None
+    assert tw.prognostics()["rul_ready"] is False
 
 
 def test_status_hysteresis_avoids_flicker():

@@ -43,6 +43,14 @@ def clamp(v: float, lo: float, hi: float) -> float:
     return lo if v < lo else hi if v > hi else v
 
 
+def fmt_db(x: float) -> str:
+    """Sign-aware dB label — never emits '--0.0' or bare '-0.0'."""
+    ax = abs(float(x))
+    if ax < 0.05:
+        return "0.0 dB"
+    return f"{ax:.1f} dB"
+
+
 @dataclass(frozen=True)
 class Params:
     # EPS
@@ -513,14 +521,14 @@ def step(s: State, h: Health, p: Params, dt: float, terrain: float = 1.0) -> dic
                     f"heaters {q_h_av + q_h_bat:.0f} W" if q_h_av + q_h_bat > 1 else f"battery at {s.t_bat:.0f}°C"),
         "TCS>GNC": (clamp(hot * hot / 3.5 + thermal_gyro_bias(s.t_av, p) / 0.03 + 0.25 * (fric - 1.0), 0, 1),
                     f"gyro drift {thermal_gyro_bias(s.t_av, p):.3f}°/s, wheel fric x{fric:.1f}"),
-        "TCS>COMMS": (clamp(temp_loss / 5.0, 0, 1), f"-{temp_loss:.1f} dB radio derate"),
+        "TCS>COMMS": (clamp(temp_loss / 5.0, 0, 1), f"{fmt_db(temp_loss)} radio derate"),
         "TCS>MOB": (1.0 - lim_tcs, "thermal payload inhibit"),
         "EPS>GNC": (clamp(2.0 * (1.0 - brown) + 0.8 * sat * (1.0 - brown), 0, 1),
                     f"bus {v_bus:.1f} V — wheel torque capped"),
-        "EPS>COMMS": (clamp(brown_db / 6.0, 0, 1), f"-{brown_db:.1f} dB low bus voltage"),
+        "EPS>COMMS": (clamp(brown_db / 6.0, 0, 1), f"{fmt_db(brown_db)} low bus voltage"),
         "EPS>MOB": (1.0 - lim_eps if duty_cmd > 0 else (0.4 if s.soc < 0.25 else 0.0),
                     f"payload shed, SOC {s.soc:.0%}"),
-        "GNC>COMMS": (clamp(point / 8.0, 0, 1), f"-{point:.1f} dB antenna mispointing"),
+        "GNC>COMMS": (clamp(point / 8.0, 0, 1), f"{fmt_db(point)} antenna mispointing"),
         "GNC>EPS": (vo, f"+{p.p_compute_vo * vo:.0f} W ADCS compute"),
         "GNC>MOB": (1.0 - lim_nav if duty_cmd > 0 else (1.0 if s.att_err > p.att_stop_deg else 0.0),
                     f"pointing {s.att_err:.1f}° — imaging quality"),

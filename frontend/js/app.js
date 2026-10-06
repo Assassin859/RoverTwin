@@ -5,9 +5,17 @@ import { Guide } from "./guide.js";
 import { EDGE_EQ } from "./edges.js";
 import { CFG, apiUrl } from "./config.js";
 import { loadReplay, playReplay } from "./replay.js";
+import {
+  buildValidationChecks, ASSUMPTIONS, actNowVsWait, drawResidualSpark,
+  backtestPctError, fmtDb, parseTelemetryCsv, hopWhy,
+} from "./evidence.js";
 
 const $ = (id) => document.getElementById(id);
-export const S = { meta: null, snap: null, history: [], events: [], pred: null, truth: false, preview: null, connected: false, allPlans: false, pauseOnCritical: true, highlightEdges: null, llmKey: "", autoHiDone: false, sessionId: "", replay: false };
+export const S = {
+  meta: null, snap: null, history: [], events: [], pred: null, truth: false, preview: null,
+  connected: false, allPlans: false, pauseOnCritical: true, highlightEdges: null, llmKey: "",
+  autoHiDone: false, sessionId: "", replay: false, backtest: null, residHist: [],
+};
 export const bus = new EventTarget();
 const emit = (type, detail) => bus.dispatchEvent(new CustomEvent(type, { detail }));
 let lastAnoms = "";
@@ -18,6 +26,7 @@ let llmPending = false;
 let wsFails = 0;
 let gotHello = false;
 let replayHandle = null;
+let replayPaused = false;
 const SUBS_ORDER = ["EPS", "TCS", "GNC", "COMMS", "MOB", "DATA"];
 const MATRIX_LABEL = { EPS: "P", TCS: "T", GNC: "A", COMMS: "C", MOB: "L", DATA: "O" };
 
@@ -25,7 +34,7 @@ const ICON = { battery: "🔋", thermal: "🌡️", sensor: "🧭", comms: "📡
 const SHORT_FAULT = { battery: "Battery", thermal: "Overheat", sensor: "Sensor", comms: "Radio" };
 const SUB_NAME = { EPS: "POWER", TCS: "THERMAL", GNC: "ADCS", COMMS: "COMMS", MOB: "PAYLOAD", DATA: "OBDH" };
 const TICKER_KINDS = new Set(["FAULT", "FDIR", "TWIN", "DIAG", "PRED", "SYNC", "CASCADE"]);
-const KIND_NAME = { FAULT: "FAULT", FDIR: "ROVER", TWIN: "TWIN", DIAG: "DIAG", PRED: "PRED", CMD: "CMD", SYNC: "LINK", SYS: "SYS", CASCADE: "CHAIN" };
+const KIND_NAME = { FAULT: "FAULT", FDIR: "SAT", TWIN: "TWIN", DIAG: "DIAG", PRED: "PRED", CMD: "CMD", SYNC: "LINK", SYS: "SYS", CASCADE: "CHAIN" };
 
 // ------------------------------------------------------------------ helpers
 export const fmtMET = (t) => {
@@ -49,8 +58,24 @@ function dispatchServerMsg(msg) {
   else if (msg.type === "error") console.warn("server:", msg.error);
 }
 
-function showReplayBanner(on) {
-  $("replayBanner")?.classList.toggle("hidden", !on);
+function showToast(msg, ms = 2800) {
+  const el = $("toast");
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.remove("hidden");
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.add("hidden"), ms);
+}
+
+function showReplayBanner(on, reason) {
+  const el = $("replayBanner");
+  if (!el) return;
+  el.classList.toggle("hidden", !on);
+  const txt = $("replayBannerTxt");
+  if (txt) {
+    txt.textContent = reason
+      || "Recorded mission (offline backup) — inject/plan disabled; loops when the tape ends.";
+  }
 }
 
 async function startReplay() {
@@ -60,7 +85,15 @@ async function startReplay() {
   setConn(true);
   try {
     const data = await loadReplay();
-    replayHandle = playReplay(data, dispatchServerMsg);
+    if (data.reason) showReplayBanner(true, data.reason);
+    replayHandle = playReplay(data, dispatchServerMsg, {
+      loop: true,
+      onLoop() {
+        showToast("Replay restarted");
+        pausedCritKey = null;
+        clearCritBanner();
+      },
+    });
   } catch (err) {
     console.warn("replay failed", err);
     setConn(false);
@@ -196,12 +229,30 @@ function onSnap(snap) {
 
 function onPred(pred) {
   S.pred = pred;
+  // Prediction backtest: compare earlier baseline point to current telemetry
+  if (pred?.baseline?.t_bat && S.snap?.twin) {
+    const arr = pred.baseline.t_bat;
+    if (arr.length > 5) {
+      const idx = Math.min(arr.length - 1, 20); // ~T+10 min at 30 s steps thinned
+      const predicted = arr[idx];
+      const actual = S.snap.twin.t_bat;
+      const err = backtestPctError(predicted, actual);
+      S.backtest = { predicted, actual, err, at: `T+${idx * 0.5 | 0}` };
+    }
+  }
   renderPred();
   emit("pred", pred);
   const fc = pred?.first_critical;
   if (S.pauseOnCritical && fc && pausedCritKey !== fc.key) {
     pausedCritKey = fc.key;
-    send("pause", { value: true });
+    if (S.replay && replayHandle) {
+      replayHandle.pause();
+      replayPaused = true;
+      const btn = $("replayPauseBtn");
+      if (btn) btn.textContent = "Resume";
+    } else {
+      send("pause", { value: true });
+    }
     showCritBanner(fc);
   }
 }
@@ -221,7 +272,14 @@ function clearCritBanner() {
 function resumeFromCritical() {
   clearCritBanner();
   // Keep pausedCritKey so the same first_critical does not immediately re-pause.
-  send("pause", { value: false });
+  if (S.replay && replayHandle) {
+    replayHandle.resume();
+    replayPaused = false;
+    const btn = $("replayPauseBtn");
+    if (btn) btn.textContent = "Pause";
+  } else {
+    send("pause", { value: false });
+  }
 }
 
 // ------------------------------------------------------------- 3D + charts
@@ -296,8 +354,8 @@ const SUBS = {
     ["Battery", `${tw.t_bat.toFixed(0)}°C`, tr && `${tr.t_bat.toFixed(0)}°C`]],
   GNC: (tw, h, tr) => [["Pointing", `${tw.att_err.toFixed(1)}°`, tr && `${tr.att_err.toFixed(1)}°`],
     ["Gyro", tw.cfg.imu === "A" ? "IMU-A" : "IMU-B"]],
-  COMMS: (tw, h, tr) => [["Link", tw.gs_pass ? (tw.down_ok ? `${tw.margin.toFixed(0)} dB` : tw.searching ? "searching" : "lost") : `next ${Math.round((tw.next_pass_s || 0) / 60)}m`,
-    tr && `${Math.max(tr.margin, -60).toFixed(0)} dB`], ["Radio", `TRX-${tw.cfg.trx}`]],
+  COMMS: (tw, h, tr) => [["Link", tw.gs_pass ? (tw.down_ok && tw.margin >= 0 ? fmtDb(tw.margin) : tw.searching ? "searching" : "lost") : `next ${Math.round((tw.next_pass_s || 0) / 60)}m`,
+    tr && fmtDb(Math.max(tr.margin, -60))], ["Radio", `TRX-${tw.cfg.trx}`]],
   MOB: (tw) => [["Duty", pct(tw.imaging_duty || 0)],
     ["Imaging", tw.cfg.mode === "SAFE" ? "safe hold" : tw.cfg.drive && tw.cfg.payload ? "on" : "off"]],
   DATA: (tw) => [["Buffer", pct(tw.buffer_mb / S.meta.buffer_cap)],
@@ -338,8 +396,20 @@ function render() {
       : `${sy.rate.toFixed(0)} kbps`;
   }
   const sy = sn.sync;
-  const mode = tw.dead ? "NO POWER" : tw.cfg.mode === "SAFE" ? (tw.auto_safe ? `SAFE · auto: ${tw.auto_safe}` : "SAFE MODE") : "NOMINAL OPS";
-  $("modePill").className = "pill " + (tw.dead ? "bad" : tw.cfg.mode === "SAFE" ? "warn" : "ok");
+  const worst = (sn.subsystems || []).reduce((w, s) => {
+    const rank = { CRITICAL: 4, WARNING: 3, WATCH: 2, NOMINAL: 1 };
+    return (rank[s.status] || 0) > (rank[w?.status] || 0) ? s : w;
+  }, null);
+  const linkBad = !!(tw.gs_pass && (tw.margin < 0 || !tw.down_ok));
+  let mode;
+  if (tw.dead) mode = "NO POWER";
+  else if (linkBad) mode = "NO LINK";
+  else if (worst?.status === "CRITICAL" || (worst && worst.score < 30)) mode = "CRITICAL";
+  else if (tw.cfg.mode === "SAFE") mode = tw.auto_safe ? `SAFE · auto: ${tw.auto_safe}` : "SAFE MODE";
+  else if (worst?.status === "WARNING") mode = "DEGRADED";
+  else mode = "NOMINAL OPS";
+  const modeBad = tw.dead || linkBad || worst?.status === "CRITICAL" || (worst && worst.score < 30);
+  $("modePill").className = "pill " + (modeBad ? "bad" : tw.cfg.mode === "SAFE" || worst?.status === "WARNING" ? "warn" : "ok");
   $("modeTxt").textContent = mode;
   const orb = sn.link || {};
   const orbitEl = $("orbitStrip");
@@ -381,7 +451,7 @@ function render() {
   const anoms = new Set(sn.anomalies);
   const nest = sn.estimator || {};
   const EST_CHIP = [
-    ["r", "R_int", 8], ["leak", "leak", 8], ["cap", "capacity", 20],
+    ["r", "R_int", 8], ["leak", "leak", 8], ["cap", "capacity", 10],
     ["rad", "radiator", 8], ["imu", "IMU", 6], ["trx", "TRX", 6],
   ];
   const estChips = EST_CHIP.map(([k, lab, need]) => {
@@ -395,8 +465,15 @@ function render() {
     return `<div class="res-row ${anoms.has(k) ? "alarm" : ""}"><span>${label}</span><div class="res-bar"><i style="left:${left}%;width:${width}%"></i></div><span>${z >= 0 ? "+" : ""}${z.toFixed(1)}σ</span></div>`;
   }).join("")
     + `<div class="est-row">${estChips}</div>`
-    + `<div class="note">How far the telemetry departs from what the twin expected. Above 3.5σ the twin flags an anomaly; the bar shrinks back once it has worked out the cause.${S.truth ? "" : " Tick “Show truth” to compare its health estimates with the hidden real values."}</div>`
-    + `<div class="note judge-blurb">57 pytest cases cover freeze-on-bad-command, cascade/prognostics, LEO orbit/pass gating, and ≥3-subsystem battery cascades.</div>`);
+    + `<div class="note">How far the telemetry departs from what the twin expected. Above 3.5σ the twin flags an anomaly; the bar shrinks back once it has worked out the cause.${S.truth ? "" : " Tick “Show truth” to compare its health estimates with the hidden real values."}</div>`);
+  renderValidate(sn);
+  S.residHist.push({ ...sn.residuals });
+  if (S.residHist.length > 120) S.residHist.shift();
+  const aScore = drawResidualSpark($("residSpark"), S.residHist, sn.residuals);
+  const aEl = $("anomalyScore");
+  if (aEl) {
+    aEl.textContent = `Anomaly score: max |z| = ${aScore.maxAbsZ.toFixed(1)}σ · ${aScore.nAbove} channel(s) > 3.5σ${aScore.channels.length ? ` (${aScore.channels.join(", ")})` : ""}`;
+  }
   patch($("estimates"), S.truth ? estimatesTable(h, sn.truth.health, tw.cfg) : "");
   $("modelDot").classList.toggle("hidden", !anoms.size);
   const anomsKey = [...anoms].sort().join(",");
@@ -430,7 +507,7 @@ function render() {
   const chips = [
     `<span class="pill ${imagingOn ? "ok" : "warn"}"><span class="dot"></span>${imagingOn ? "imaging on" : "imaging idle"}</span>`,
     `<span class="pill ${tw.eclipse || orb.eclipse ? "warn" : "ok"}"><span class="dot"></span>${tw.eclipse || orb.eclipse ? "eclipse" : "sunlit orbit"}</span>`,
-    `<span class="pill ${tw.down_ok ? "ok" : "bad"}"><span class="dot"></span>${tw.down_ok ? `link ${tw.margin.toFixed(0)} dB` : "no link"}</span>`,
+    `<span class="pill ${tw.down_ok && tw.margin >= 0 ? "ok" : "bad"}"><span class="dot"></span>${tw.down_ok && tw.margin >= 0 ? `link ${fmtDb(tw.margin)}` : "no link"}</span>`,
   ];
   if (sy.state === "BLIND") chips.push(`<span class="pill bad"><span class="dot"></span>no telemetry: showing the twin's own prediction</span>`);
   if (S.truth) chips.push(`<span class="pill" style="color:var(--cyan)">wireframe = hidden truth</span>`);
@@ -487,10 +564,21 @@ function renderChain(chain) {
     const cls = [on ? "on" : "", st.id === latest ? "pulse" : "", st.resolved ? "resolved" : ""].filter(Boolean).join(" ");
     const eqKey = edges[edges.length - 1];
     const eq = (st.kind === "edge" || st.kind === "path") && eqKey ? (EDGE_EQ[eqKey] || "") : "";
+    const why = (st.kind === "edge" || st.kind === "path") && eqKey ? hopWhy(eqKey) : "";
     return `<li data-edges="${esc(edges.join("|"))}" data-id="${esc(st.id)}" class="${cls}">
-      <span class="ch-n">${st.n || ""}.</span><span class="ch-k">${esc(st.kind)}</span>${esc(st.text)}${eq ? `<div class="ch-eq" title="${esc(eq)}">${esc(eq)}</div>` : ""}</li>`;
+      <span class="ch-n">${st.n || ""}.</span><span class="ch-k">${esc(st.kind)}</span>${esc(st.text)}${eq ? `<div class="ch-eq" title="${esc(eq)}">${esc(eq)}</div>` : ""}${why ? `<div class="ch-why">${esc(why)}</div>` : ""}</li>`;
   }).join("");
   patch(box, `<div class="ch-h">CHAIN REACTION <small>${stages.length} stage${stages.length === 1 ? "" : "s"}</small></div><ol>${rows}</ol>`);
+}
+
+function renderValidate(sn) {
+  const box = $("validateStrip");
+  if (!box) return;
+  const checks = buildValidationChecks(sn, S.meta);
+  const assum = (S.meta?.assumptions || ASSUMPTIONS).slice(0, 3);
+  patch(box, `<div class="ch-h" style="margin-bottom:4px">MODEL CHECK</div>`
+    + checks.map((c) => `<div class="vc ${c.ok ? "ok" : "bad"}"><b>${esc(c.name)}</b><span>${esc(c.observed)}</span><span style="grid-column:1/-1">${esc(c.reference)}</span></div>`).join("")
+    + `<div class="note" style="margin-top:6px"><b>Assumptions / limits:</b> ${assum.map(esc).join(" · ")}</div>`);
 }
 
 function renderCorrTable(corr, hi) {
@@ -614,6 +702,8 @@ async function refreshLlmStatus() {
   if (S.replay || isDeployHost()) {
     const badge = $("llmBadge");
     if (badge) badge.textContent = "operator note";
+    const sub = $("noteSub");
+    if (sub) sub.textContent = "recorded mission note";
     return;
   }
   try {
@@ -638,10 +728,53 @@ function renderPred() {
   const p = S.pred;
   if (!p || !S.snap) { patch($("impact"), `<div class="impact-sub">Waiting for the first prediction…</div>`); return; }
   const fc = p.first_critical;
+  const activeFind = (S.snap.findings || []).some((f) => !f.contained && (f.conf ?? 1) >= 0.5);
+  let head;
+  if (fc) {
+    // Ensemble time-to-threshold band when available
+    const band = p.band?.t_bat;
+    let bandNote = "";
+    if (band && band.length > 2) {
+      const lim = 50;
+      let tMin = null, tMax = null;
+      band.forEach((pair, i) => {
+        if (pair[1] >= lim) {
+          if (tMin == null) tMin = i * 30;
+          tMax = i * 30;
+        }
+      });
+      if (tMin != null) bandNote = ` (ensemble ${fmtDur(tMin)}–${fmtDur(tMax)})`;
+    }
+    head = `${esc(fc.text)} in ${fmtDur(fc.t)}${bandNote}`;
+  } else if (activeFind) {
+    head = "Forecast still risky — diagnosis active";
+  } else {
+    head = "All clear for the next 2 hours";
+  }
   const evs = [...p.events.map((e) => ({ ...e })), ...p.fdir].sort((a, b) => a.t - b.t);
   patch($("impact"), `
-    <div class="impact-head ${fc ? "bad" : "ok"}">${fc ? `${esc(fc.text)} in ${fmtDur(fc.t)}` : "All clear for the next 2 hours"}</div>
+    <div class="impact-head ${fc || activeFind ? "bad" : "ok"}">${head}</div>
     ${evs.length ? evs.slice(0, 4).map((e) => `<div class="ev ${e.level}"><span>in ${fmtDur(e.t)}</span><span>${e.level === "info" ? "FDIR: " : ""}${esc(e.text)}</span></div>`).join("") : `<div class="note">The twin expects the spacecraft to stay healthy through the next orbits.</div>`}`);
+
+  const bt = $("backtestLine");
+  if (bt) {
+    if (S.backtest) {
+      const b = S.backtest;
+      bt.textContent = `Backtest: predicted ${b.predicted.toFixed(1)} °C at ${b.at}, actual ${b.actual.toFixed(1)} °C, error ${b.err.toFixed(1)}%`;
+    } else bt.textContent = "";
+  }
+
+  const aw = actNowVsWait(p, S.snap.twin?.next_pass_s || S.snap.link?.next_pass_s);
+  const awBox = $("actWait");
+  if (awBox && aw) {
+    patch(awBox, `
+      <div class="aw act"><h4>ACT NOW</h4><b>${esc(aw.act.name)}</b>
+        <div>score ${aw.act.score.toFixed(0)} · peak ${aw.act.maxTb?.toFixed(0) ?? "—"}°C · min SoC ${pct(aw.act.minSoc ?? 0)}</div>
+        <div class="note">${esc(aw.act.why)}</div></div>
+      <div class="aw wait"><h4>WAIT FOR NEXT PASS</h4><b>${esc(aw.wait.name)}</b>
+        <div>score ${aw.wait.score.toFixed(0)} · peak ${aw.wait.maxTb?.toFixed(0) ?? "—"}°C · min SoC ${pct(aw.wait.minSoc ?? 0)} · next ~${aw.wait.nextPassMin} min</div>
+        <div class="note">${esc(aw.wait.why)}</div></div>`);
+  }
 
   const tw = S.snap.twin;
   const ids = p.plans.map((x) => x.id).join(",");
@@ -651,7 +784,7 @@ function renderPred() {
     box.innerHTML = p.plans.map((pl) => `<div class="plan" data-id="${esc(pl.id)}">
       <div class="plan-h"><span class="rk badge hidden">BEST</span><b>${esc(pl.name)}</b><span class="sc"></span></div>
       <div class="scorebar"><i></i></div><div class="notes"></div>
-      <div class="acts"><button class="pbtn" data-act="preview">Preview</button><button class="pbtn go" data-act="run">Execute</button><span class="up badge warn hidden">queued until next pass</span></div></div>`).join("");
+      <div class="acts"><button class="pbtn" data-act="preview">Preview</button><button class="pbtn go" data-act="run">${S.replay ? "Recorded" : "Execute"}</button><span class="up badge warn hidden">queued until next pass</span></div></div>`).join("");
   }
   const shown = S.allPlans ? p.plans.length : 3;
   p.plans.forEach((pl, i) => {
@@ -665,9 +798,18 @@ function renderPred() {
     el.querySelector(".rk").classList.toggle("hidden", !(i === 0 && pl.id !== "continue"));
     el.querySelector(".sc").textContent = pl.score.toFixed(0);
     el.querySelector(".scorebar i").style.width = `${Math.max(0, Math.min(100, pl.score))}%`;
-    patch(el.querySelector(".notes"), pl.notes.slice(0, 2).map((n) => `<span class="${n === "all limits respected" ? "good" : ""}">${esc(n)}</span>`).join(""));
+    const why = pl.why || pl.notes?.[0] || "";
+    patch(el.querySelector(".notes"), [
+      why ? `<span class="${why === "all limits respected" || why.includes("nominal") ? "good" : ""}">${esc(why)}</span>` : "",
+      ...pl.notes.slice(0, 1).filter((n) => n !== why).map((n) => `<span class="${n === "all limits respected" ? "good" : ""}">${esc(n)}</span>`),
+    ].join(""));
+    const runBtn = el.querySelector("[data-act=run]");
+    runBtn.classList.toggle("hidden", pl.id === "continue" || pl.name === "No action needed");
+    if (S.replay) {
+      runBtn.disabled = true;
+      runBtn.title = "Recorded mission — Execute disabled; watch the tape";
+    }
     el.querySelector("[data-act=preview]").classList.toggle("on", S.preview === pl.id);
-    el.querySelector("[data-act=run]").classList.toggle("hidden", pl.id === "continue");
     el.querySelector(".up").classList.toggle("hidden", !(pl.needs_uplink && !tw.up_ok));
   });
   const more = $("morePlans");
@@ -716,6 +858,46 @@ $("resetBtn").onclick = () => { pausedCritKey = null; clearCritBanner(); S.llmKe
 $("truth").onchange = (e) => { S.truth = e.target.checked; render(); };
 $("pauseCrit").onchange = (e) => { S.pauseOnCritical = e.target.checked; if (!e.target.checked) { pausedCritKey = null; clearCritBanner(); } };
 $("critResume")?.addEventListener("click", resumeFromCritical);
+$("replayPauseBtn")?.addEventListener("click", () => {
+  if (!replayHandle) return;
+  if (replayPaused || replayHandle.paused) {
+    replayHandle.resume();
+    replayPaused = false;
+    $("replayPauseBtn").textContent = "Pause";
+    clearCritBanner();
+  } else {
+    replayHandle.pause();
+    replayPaused = true;
+    $("replayPauseBtn").textContent = "Resume";
+  }
+});
+$("csvIngest")?.addEventListener("change", async (e) => {
+  const status = $("csvIngestStatus");
+  if (S.replay || isDeployHost()) {
+    if (status) status.textContent = "available with live backend";
+    e.target.value = "";
+    return;
+  }
+  const file = e.target.files?.[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const rows = parseTelemetryCsv(text);
+    if (!rows.length) throw new Error("no rows");
+    const res = await fetch(apiUrl("/api/telemetry/ingest"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ csv: text }),
+    });
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.detail || "ingest failed");
+    if (status) status.textContent = `SYNCED · ${j.ingested} frames · twin ${j.sync}`;
+    showToast(`CSV ingest: ${j.ingested} frames → ${j.sync}`);
+  } catch (err) {
+    if (status) status.textContent = `ingest failed: ${err.message || err}`;
+  }
+  e.target.value = "";
+});
 $("explainBtn").onclick = () => { S.llmKey = ""; fetchExplain(true); };
 $("corrTable").addEventListener("click", (e) => {
   const tr = e.target.closest("tr[data-edges]");

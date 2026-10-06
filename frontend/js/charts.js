@@ -40,7 +40,7 @@ export class Chart {
     const sc = cfg.scale;
 
     // frame + grid
-    ctx.font = "10px 'IBM Plex Mono', monospace";
+    ctx.font = "11px 'IBM Plex Mono', monospace";
     ctx.fillStyle = C.text;
     ctx.strokeStyle = C.frame;
     ctx.lineWidth = 1;
@@ -110,7 +110,7 @@ export class Chart {
     ctx.beginPath(); ctx.moveTo(X(now), T); ctx.lineTo(X(now), T + ph); ctx.stroke();
 
     // title + current value
-    ctx.font = "700 10px Orbitron, sans-serif";
+    ctx.font = "700 11px Orbitron, sans-serif";
     ctx.fillStyle = "#ff9933";
     ctx.fillText(cfg.title, L, 12);
     const last = hist[hist.length - 1];

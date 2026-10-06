@@ -1,10 +1,10 @@
-# RoverTwin: Mission Digital Twin for Predictive Fault Simulation
+# SatTwin: Mission Digital Twin for Predictive Fault Simulation
 
 **TECHFEST 2026–27 Space Technology Hackathon, Problem Statement ST-09**
 
 ![Battery fault demo](docs/assets/battery-demo.gif)
 
-RoverTwin is a **telemetry-synchronised LEO Earth-observation smallsat digital twin** (~95 min orbit, eclipse + ground-station passes; EPS / TCS / ADCS / COMMS / PAYLOAD / OBDH). Not a dashboard of canned plots: the twin runs shared physics, corrects from pass-gated frames, surfaces cause→effect cascades, predicts impact, and ranks recovery before the next uplink.
+SatTwin (repo: RoverTwin) is a **telemetry-synchronised LEO Earth-observation smallsat digital twin** (~95 min orbit, eclipse + ground-station passes; EPS / TCS / ADCS / COMMS / PAYLOAD / OBDH). Not a dashboard of canned plots: the twin runs shared physics, corrects from pass-gated frames, surfaces cause→effect cascades, predicts impact, and ranks recovery before the next uplink. **Venue demo:** local `uvicorn` on the laptop; https://rovertwin.vercel.app is the offline recorded-mission backup.
 
 The twin never reads the simulated spacecraft's state. It only sees telemetry frames, as a ground segment would (enforced by `tests/test_twin.py`). “Show truth” in the UI is a **test harness** overlay for fidelity checks — never the twin’s belief.
 

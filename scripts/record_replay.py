@@ -4,6 +4,9 @@
 Usage (from repo root):
   python scripts/record_replay.py
 Writes frontend/assets/demo-replay.json.gz
+
+Tape includes: mid-run critical pred, eclipse + AOS/LOS cues, run_plan isolate,
+recovery snaps — compressed so t_wall ≤ ~3 min.
 """
 from __future__ import annotations
 
@@ -18,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 from backend.mission import Mission  # noqa: E402
 
 OUT = ROOT / "frontend" / "assets" / "demo-replay.json.gz"
+MAX_WALL = 170.0  # seconds — leave headroom under 3 min
 
 
 def _thin_pred(pred: dict | None) -> dict | None:
@@ -25,7 +29,6 @@ def _thin_pred(pred: dict | None) -> dict | None:
         return None
     out = {k: pred[k] for k in ("t0", "horizon", "events", "fdir", "first_critical", "recommended") if k in pred}
     out["band"] = pred.get("band")
-    # Keep every 4th sample of each series to shrink payload
     base = pred.get("baseline") or {}
     series = {}
     for k, arr in base.items():
@@ -36,7 +39,7 @@ def _thin_pred(pred: dict | None) -> dict | None:
     out["baseline"] = series
     plans = []
     for p in pred.get("plans") or []:
-        pl = {k: p[k] for k in ("id", "name", "plain", "score", "notes", "metrics", "cmds", "blocked", "needs_uplink", "delivered") if k in p}
+        pl = {k: p[k] for k in ("id", "name", "plain", "why", "score", "notes", "metrics", "cmds", "blocked", "needs_uplink", "delivered", "end_margin") if k in p}
         ser = {}
         for k, arr in (p.get("series") or {}).items():
             if isinstance(arr, list) and len(arr) > 20:
@@ -53,23 +56,45 @@ def _thin_pred(pred: dict | None) -> dict | None:
 def _sample(m: Mission) -> dict | None:
     if not m.history:
         return None
-    h = m.history[-1]
-    # history entries are already compact dicts from Mission
-    return h
+    return m.history[-1]
+
+
+def _emit_snap(m: Mission, messages: list, wall: list, last_event_id: list, dt: float = 0.12) -> None:
+    snap = m.snapshot()
+    snap["type"] = "snap"
+    snap["session_id"] = "replay"
+    new_ev = [e for e in m.events if e["id"] > last_event_id[0]]
+    if new_ev:
+        last_event_id[0] = new_ev[-1]["id"]
+    snap["events"] = new_ev
+    snap["sample"] = _sample(m)
+    messages.append({"t_wall": round(wall[0], 3), "msg": snap})
+    wall[0] += dt
+
+
+def _ensure_pred(m: Mission, messages: list, wall: list, last_pred_seq: list) -> None:
+    if m.prediction is None or m.pred_seq == 0:
+        try:
+            m.set_prediction(m.compute_prediction(m.prediction_inputs()))
+        except Exception:
+            return
+    if m.prediction and m.pred_seq != last_pred_seq[0]:
+        last_pred_seq[0] = m.pred_seq
+        messages.append({"t_wall": round(wall[0], 3), "msg": {"type": "pred", "pred": _thin_pred(m.prediction)}})
+        wall[0] += 0.04
 
 
 def main() -> None:
     m = Mission(seed=3)
     messages: list[dict] = []
-    wall = 0.0
-    last_event_id = 0
-    last_pred_seq = -1
-    snap_every = 8  # emit snap every N advances of 2s → ~16 sim-s between UI snaps at record rate
+    wall = [0.0]
+    last_event_id = [0]
+    last_pred_seq = [-1]
+    snap_every = 10
 
-    def emit(msg: dict, dt_wall: float = 0.35) -> None:
-        nonlocal wall
-        messages.append({"t_wall": round(wall, 3), "msg": msg})
-        wall += dt_wall
+    def emit(msg: dict, dt_wall: float = 0.25) -> None:
+        messages.append({"t_wall": round(wall[0], 3), "msg": msg})
+        wall[0] += dt_wall
 
     # Settle then inject battery
     m.advance(600)
@@ -88,55 +113,93 @@ def main() -> None:
     hello["snap"]["events"] = []
     hello["snap"]["sample"] = _sample(m)
     emit(hello, 0.0)
-    last_event_id = m.event_seq
+    last_event_id[0] = m.event_seq
 
     m.inject("battery", 0.9, 0.0)
     n = 0
-    # ~35 min sim at coarse steps for cascade + critical
-    while m.t < 600 + 2100:
+    saw_crit = False
+    saw_ecl = False
+    saw_pass = False
+    # Phase 1: cascade until critical forecast + some orbit cues
+    while m.t < 600 + 2800 and wall[0] < MAX_WALL * 0.55:
         m.advance(2.0)
         n += 1
-        if m.prediction is None or m.pred_seq == 0:
-            try:
-                m.set_prediction(m.compute_prediction(m.prediction_inputs()))
-            except Exception:
-                pass
-        if n % snap_every != 0 and not (m.events and m.events[-1]["id"] > last_event_id):
-            continue
+        _ensure_pred(m, messages, wall, last_pred_seq)
         snap = m.snapshot()
-        snap["type"] = "snap"
-        snap["session_id"] = "replay"
-        new_ev = [e for e in m.events if e["id"] > last_event_id]
-        if new_ev:
-            last_event_id = new_ev[-1]["id"]
-        snap["events"] = new_ev
-        snap["sample"] = _sample(m)
-        emit(snap, 0.25 if new_ev else 0.12)
-        if m.prediction and m.pred_seq != last_pred_seq:
-            last_pred_seq = m.pred_seq
-            emit({"type": "pred", "pred": _thin_pred(m.prediction)}, 0.05)
+        if snap.get("twin", {}).get("eclipse"):
+            saw_ecl = True
+        if snap.get("twin", {}).get("gs_pass"):
+            saw_pass = True
+        if m.prediction and m.prediction.get("first_critical"):
+            saw_crit = True
+        if n % snap_every != 0 and not (m.events and m.events[-1]["id"] > last_event_id[0]):
+            continue
+        _emit_snap(m, messages, wall, last_event_id, 0.18 if m.events and m.events[-1]["id"] == last_event_id[0] else 0.1)
+        _ensure_pred(m, messages, wall, last_pred_seq)
+        if saw_crit and saw_ecl and n > 200:
+            break
 
-    # Force a final prediction
+    # Force prediction with critical if missing
     pred = m.compute_prediction(m.prediction_inputs())
     m.set_prediction(pred)
-    snap = m.snapshot()
-    snap["type"] = "snap"
-    snap["session_id"] = "replay"
-    snap["events"] = []
-    snap["sample"] = _sample(m)
-    emit(snap, 0.2)
+    _emit_snap(m, messages, wall, last_event_id, 0.15)
     emit({"type": "pred", "pred": _thin_pred(pred)}, 0.05)
+    last_pred_seq[0] = m.pred_seq
+
+    # Phase 2: run isolate plan during a pass window (or force uplink when in pass)
+    # Advance until gs_pass or timeout, then run_plan
+    for _ in range(400):
+        if wall[0] > MAX_WALL * 0.72:
+            break
+        m.advance(2.0)
+        if m.plant.s.cfg.mode and m.snapshot().get("twin", {}).get("gs_pass"):
+            break
+    try:
+        m.run_plan("isolate")
+    except Exception:
+        try:
+            m.command("bat_isolated", True)
+        except Exception:
+            pass
+
+    # Phase 3: recovery + confirm while compressing wall
+    for _ in range(180):
+        if wall[0] >= MAX_WALL - 8:
+            break
+        m.advance(3.0)
+        n += 1
+        if n % 4 == 0:
+            _emit_snap(m, messages, wall, last_event_id, 0.08)
+            _ensure_pred(m, messages, wall, last_pred_seq)
+
+    # Final recovery snap + pred
+    try:
+        pred2 = m.compute_prediction(m.prediction_inputs())
+        m.set_prediction(pred2)
+    except Exception:
+        pred2 = m.prediction
+    _emit_snap(m, messages, wall, last_event_id, 0.12)
+    if pred2:
+        emit({"type": "pred", "pred": _thin_pred(pred2)}, 0.04)
+
+    # Compress wall times into ≤ MAX_WALL if overshot
+    if wall[0] > MAX_WALL and messages:
+        scale = MAX_WALL / wall[0]
+        for row in messages:
+            row["t_wall"] = round(row["t_wall"] * scale, 3)
 
     payload = {
-        "version": 1,
-        "title": "Battery cascade demo (LEO)",
+        "version": 2,
+        "title": "Battery cascade + isolate recovery (LEO)",
+        "reason": "Recorded mission for offline venue backup — inject/plan disabled; loop when tape ends.",
+        "cues": {"critical": saw_crit, "eclipse": saw_ecl, "pass": saw_pass},
         "messages": messages,
     }
     OUT.parent.mkdir(parents=True, exist_ok=True)
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     with gzip.open(OUT, "wb", compresslevel=9) as f:
         f.write(raw)
-    print(f"wrote {OUT} ({OUT.stat().st_size} bytes, {len(messages)} messages, sim t={m.t:.0f}s)")
+    print(f"wrote {OUT} ({OUT.stat().st_size} bytes, {len(messages)} messages, sim t={m.t:.0f}s, wall={messages[-1]['t_wall']:.1f}s)")
 
 
 if __name__ == "__main__":

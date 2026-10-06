@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>RoverTwin · Mission Digital Twin for Predictive Fault Simulation</title>
+<title>SatTwin · Mission Digital Twin for Predictive Fault Simulation</title>
 <meta name="description" content="A telemetry-synchronised digital twin of a LEO Earth-observation smallsat — not a dashboard. Fault injection, cascading-failure propagation, prediction and recovery simulation.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;800&family=Rajdhani:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -27,7 +27,7 @@
     </div>
     <div class="hero">
       <div class="tag">TECHFEST 2026–27 · ST-09 · Satellite-ops digital twin</div>
-      <h1>ROVER<br>TWIN</h1>
+      <h1>SAT<br>TWIN</h1>
       <p class="lead">A <b>spacecraft digital twin</b> for LEO satellite operations: Earth-observation smallsat (~95 min orbit, eclipse + ground passes), coupled EPS / TCS / ADCS / COMMS / PAYLOAD / OBDH. Not a dashboard of canned plots — inject faults, watch cause→effect cascades, predict impact, and rank recovery before the next pass.</p>
       <ul class="how">
         <li><b>MIRROR</b>Same physics model as the spacecraft; corrected by telemetry.</li>
@@ -47,7 +47,7 @@
 
 <section id="console" class="screen">
   <header class="topbar">
-    <button class="brand" id="home" title="Back to start"><i></i>ROVERTWIN</button>
+    <button class="brand" id="home" title="Back to start"><i></i>SATTWIN</button>
     <span class="met" id="met">MET 00:00:00</span>
     <span class="pill" id="syncPill" title="Twin sync to telemetry (not a live plant read)"><span class="dot"></span><span id="syncTxt">INIT</span><small id="syncSub"></small></span>
     <span class="pill" id="modePill"><span class="dot"></span><span id="modeTxt">NOMINAL</span></span>
@@ -69,15 +69,17 @@
     <button type="button" class="cta" id="critResume">Resume</button>
   </div>
   <div id="replayBanner" class="replay-banner hidden" role="status">
-    Live backend offline — playing recorded mission
+    <span id="replayBannerTxt">Live backend offline — playing recorded mission</span>
+    <button type="button" class="tbtn" id="replayPauseBtn" style="margin-left:8px;padding:2px 8px">Pause</button>
   </div>
+  <div id="toast" class="toast hidden" role="status"></div>
 
   <main class="grid">
     <aside class="col left">
       <div class="panel" id="subsPanel"><h3>HEALTH <small>as the twin sees it</small></h3><div id="subs" class="subs-grid"></div></div>
       <div class="panel" id="diagPanel"><h3>WHAT'S WRONG <small>found by the twin</small></h3><div id="diag"></div></div>
       <div class="panel" id="notePanel">
-        <h3>OPERATOR NOTE <small>local qwen2.5:3b · twin facts only</small>
+        <h3>OPERATOR NOTE <small id="noteSub">twin facts only</small>
           <button class="tbtn" id="explainBtn" type="button" style="margin-left:auto;padding:2px 8px;font-size:11px">Explain</button>
         </h3>
         <div id="llmBadge" class="note">Checking Ollama…</div>
@@ -95,7 +97,7 @@
           <div id="corrTable" class="corr-table"></div>
           <div id="corrMatrix" class="corr-matrix" title="Live 6×6 coupling strengths"></div>
         </div>
-        <div class="panel" id="impactPanel"><h3>WHAT HAPPENS NEXT <small>2 h forecast if nothing is done</small></h3><div id="impact"></div></div>
+        <div class="panel" id="impactPanel"><h3>WHAT HAPPENS NEXT <small>2 h forecast if nothing is done</small></h3><div id="impact"></div><div id="backtestLine" class="backtest-line note"></div></div>
       </div>
       <div class="panel view" id="view">
         <div class="view-overlay" id="viewChips"></div>
@@ -122,7 +124,7 @@
         </div>
         <div class="active-f" id="activeFaults"></div>
       </div>
-      <div class="panel" id="plansPanel"><h3>HOW TO FIX IT <small>each option simulated 2 h ahead</small></h3><div id="plans"></div><button class="more hidden" id="morePlans"></button></div>
+      <div class="panel" id="plansPanel"><h3>HOW TO FIX IT <small>each option simulated 2 h ahead</small></h3><div id="actWait" class="act-wait"></div><div id="plans"></div><button class="more hidden" id="morePlans"></button></div>
       <div class="panel tabs" id="morePanel">
         <div class="tabbar" role="tablist">
           <button role="tab" data-tab="logPanel" class="on">Log</button>
@@ -131,7 +133,16 @@
         </div>
         <div class="tab-pane on" id="logPanel"><div id="log"></div></div>
         <div class="tab-pane" id="cmdPanel"><div id="cmds"></div><div class="pending" id="pending"></div></div>
-        <div class="tab-pane" id="residPanel"><div id="resid"></div><div id="estimates"></div></div>
+        <div class="tab-pane" id="residPanel">
+          <div id="validateStrip" class="validate-strip"></div>
+          <canvas id="residSpark" class="resid-spark" width="220" height="36" aria-label="Residual sparkline"></canvas>
+          <div id="anomalyScore" class="note"></div>
+          <div id="resid"></div><div id="estimates"></div>
+          <div class="csv-ingest">
+            <label class="note">CSV ingest (live backend) <input type="file" id="csvIngest" accept=".csv,text/csv"></label>
+            <span id="csvIngestStatus" class="note"></span>
+          </div>
+        </div>
       </div>
     </aside>
   </main>

@@ -24,33 +24,84 @@ export async function loadReplay(url = REPLAY_URL) {
 
 /**
  * Play timed hello/snap/pred messages through dispatch(msg).
- * @returns {{ stop: () => void }}
+ * Supports pause / resume / loop and wall-clock scaling.
+ * @returns {{ stop: () => void, pause: () => void, resume: () => void, setLoop: (v: boolean) => void, paused: boolean }}
  */
-export function playReplay(data, dispatch, { onDone } = {}) {
+export function playReplay(data, dispatch, { onDone, onLoop, loop = true } = {}) {
   const msgs = data.messages || [];
-  const timers = [];
   let i = 0;
-  const t0 = performance.now();
+  let timer = null;
+  let paused = false;
+  let looping = loop;
+  let pauseAccum = 0;
+  let pauseAt = 0;
+  let t0 = performance.now();
   const wall0 = msgs[0]?.t_wall ?? 0;
+  let stopped = false;
+
+  function clear() {
+    if (timer != null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  }
+
+  function wallElapsed() {
+    const now = performance.now();
+    if (paused) return pauseAt - t0 - pauseAccum;
+    return now - t0 - pauseAccum;
+  }
 
   function scheduleNext() {
+    clear();
+    if (stopped || paused) return;
     if (i >= msgs.length) {
+      if (looping) {
+        i = 0;
+        t0 = performance.now();
+        pauseAccum = 0;
+        onLoop?.();
+        scheduleNext();
+        return;
+      }
       onDone?.();
       return;
     }
-    const m = msgs[i++];
-    const delay = Math.max(0, ((m.t_wall ?? 0) - wall0) * 1000 - (performance.now() - t0));
-    const id = setTimeout(() => {
+    const m = msgs[i];
+    const target = ((m.t_wall ?? 0) - wall0) * 1000;
+    const delay = Math.max(0, Math.min(target - wallElapsed(), 60000));
+    timer = setTimeout(() => {
+      timer = null;
+      if (stopped || paused) return;
+      i += 1;
       dispatch(m.msg);
       scheduleNext();
-    }, Math.min(delay, 60000));
-    timers.push(id);
+    }, delay);
   }
+
   scheduleNext();
   return {
+    get paused() {
+      return paused;
+    },
     stop() {
-      for (const id of timers) clearTimeout(id);
-      timers.length = 0;
+      stopped = true;
+      clear();
+    },
+    pause() {
+      if (paused || stopped) return;
+      paused = true;
+      pauseAt = performance.now();
+      clear();
+    },
+    resume() {
+      if (!paused || stopped) return;
+      pauseAccum += performance.now() - pauseAt;
+      paused = false;
+      scheduleNext();
+    },
+    setLoop(v) {
+      looping = !!v;
     },
   };
 }
