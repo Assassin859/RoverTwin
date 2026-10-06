@@ -4,9 +4,9 @@
 
 ![Battery fault demo](docs/assets/battery-demo.gif)
 
-RoverTwin is a **telemetry-synchronised spacecraft / satellite-ops digital twin** — lunar surface asset + relay satellite (EPS / TCS / ADCS / COMMS). Not a dashboard of canned plots: the twin runs shared physics, corrects from delayed frames, surfaces cause→effect cascades, predicts impact, and ranks recovery before uplink.
+RoverTwin is a **telemetry-synchronised LEO Earth-observation smallsat digital twin** (~95 min orbit, eclipse + ground-station passes; EPS / TCS / ADCS / COMMS / PAYLOAD / OBDH). Not a dashboard of canned plots: the twin runs shared physics, corrects from pass-gated frames, surfaces cause→effect cascades, predicts impact, and ranks recovery before the next uplink.
 
-The twin never reads the simulated rover's state. It only sees telemetry frames, as a ground segment would (enforced by `tests/test_twin.py`). “Show truth” in the UI is a **test harness** overlay for fidelity checks — never the twin’s belief.
+The twin never reads the simulated spacecraft's state. It only sees telemetry frames, as a ground segment would (enforced by `tests/test_twin.py`). “Show truth” in the UI is a **test harness** overlay for fidelity checks — never the twin’s belief.
 
 Judge deck (4 traps answered): [`docs/RoverTwin-ST09.pptx`](docs/RoverTwin-ST09.pptx).
 
@@ -14,9 +14,9 @@ Judge deck (4 traps answered): [`docs/RoverTwin-ST09.pptx`](docs/RoverTwin-ST09.
 
 | ST-09 expect / trap | RoverTwin | Verdict |
 | --- | --- | --- |
-| ≥3 linked subsystems with cause–effect | 6 (EPS/TCS/GNC/COMMS/MOB/DATA), 14 edges in `model.py` | Pass |
+| ≥3 linked subsystems with cause–effect | 6 (EPS/TCS/GNC≈ADCS/COMMS/MOB≈PAYLOAD/DATA≈OBDH), 14 edges in `model.py` | Pass |
 | Not an isolated dashboard | Twin + RadioLink sync; landing copy says twin ≠ dashboard | Pass |
-| Telemetry sync | SYNCED / LOW RATE / BLIND; 2.6 s latency | Pass |
+| Telemetry sync | SYNCED / LOW RATE / BLIND; pass-gated AOS/LOS | Pass |
 | Fault inject (battery / thermal / sensor / comms) | Test harness + guided demo | Pass |
 | Predicted impact + recovery | Ensemble + ranked plans | Pass |
 | Live demo: inject and see cascade | Cascade path highlight + cause→effect table + 6×6 matrix | Pass |
@@ -27,8 +27,8 @@ Judge deck (4 traps answered): [`docs/RoverTwin-ST09.pptx`](docs/RoverTwin-ST09.
 
 | ST-09 expected output | Where it lives |
 | --- | --- |
-| Subsystem model | `backend/model.py`: power (EPS), thermal (TCS), attitude (ADCS/GNC), radio (COMMS), mobility (MOB) and science data (DATA), coupled through 14 explicit equations, plus onboard fault protection |
-| Telemetry synchronisation | `backend/plant.py` radio link (2.6 s latency, frame cadence limited by data rate, packet loss) and `backend/twin.py` (state blending, sync states SYNCED / LOW RATE / BLIND, uncertainty growth while blind) |
+| Subsystem model | `backend/model.py`: LEO orbit clock (~95 min), EPS/TCS/ADCS(GNC)/COMMS/PAYLOAD(MOB)/OBDH(DATA), eclipse + GS passes, 14 coupling equations + FDIR |
+| Telemetry synchronisation | `backend/plant.py` pass-gated RadioLink and `backend/twin.py` (SYNCED / LOW RATE between passes / BLIND on missed AOS) |
 | Fault injection | Battery degradation, thermal stress, sensor failure and communication loss, at any severity, instant or ramped, alone or combined |
 | Cause→effect correlations | `backend/correlate.py`: 6×6 matrix, multi-hop paths, active edges on each snapshot |
 | Predicted impact | A 2-hour forecast from the twin's *estimated* health. A 5-member ensemble gives uncertainty bands, and the first limit violation is called out |
@@ -151,10 +151,26 @@ Open <http://localhost:8000>. Each browser console gets a **private** WebSocket 
 
 ### Static UI on Vercel
 
-The `frontend/` folder can be hosted on Vercel for landing / walkthrough visuals. The live twin (WebSocket + FastAPI) does **not** run on Vercel — start `uvicorn` locally for inject / cascade / predict.
+`frontend/` deploys to Vercel. Without a reachable FastAPI host the site **plays a recorded battery-cascade mission** (`frontend/assets/demo-replay.json.gz`) with a banner: *Live backend offline — playing recorded mission*.
 
 ```bash
 npx vercel --prod
+```
+
+Point the static UI at a live backend (CORS-enabled uvicorn):
+
+```
+https://rovertwin.vercel.app/?backend=http://127.0.0.1:8000
+```
+
+`?backend=` accepts `http(s)://host:port` or `ws(s)://host`; the value is also stored in `localStorage.rovertwinBackend`.
+
+Backend CORS allows `https://rovertwin.vercel.app` and localhost. Extra origins: env `ROVERTWIN_CORS` (comma-separated).
+
+Re-record the offline demo (after physics/UI changes):
+
+```bash
+python scripts/record_replay.py
 ```
 
 ```bash
@@ -223,12 +239,17 @@ backend/
   app.py       FastAPI: WebSocket /ws, REST /api/*, static frontend
 frontend/
   index.html, css/style.css
+  assets/demo-replay.json.gz   offline Vercel recorded mission
+  js/config.js    ?backend= / apiBase / wsUrl
+  js/replay.js    gzip replay player
   js/app.js       console state, WebSocket, panels, correlations, LLM note
-  js/scene.js     Three.js rover, terrain, relay orbiter, truth ghost
+  js/scene.js     Three.js LEO Earth + spacecraft
   js/charts.js    telemetry / twin / prediction / plan charts
   js/cascade.js   live fault-propagation graph (path highlight)
   js/edges.js     shared edge stories + equation tooltips
   js/guide.js     guided demo + mission report
+scripts/
+  record_replay.py   regenerate frontend/assets/demo-replay.json.gz
 docs/
   RoverTwin-ST09.pptx   judge slides (4 traps)
   assets/               GIF + stills

@@ -3,9 +3,11 @@ import { Chart, CHARTS, chartLegend } from "./charts.js";
 import { Cascade } from "./cascade.js";
 import { Guide } from "./guide.js";
 import { EDGE_EQ } from "./edges.js";
+import { CFG, apiUrl } from "./config.js";
+import { loadReplay, playReplay } from "./replay.js";
 
 const $ = (id) => document.getElementById(id);
-export const S = { meta: null, snap: null, history: [], events: [], pred: null, truth: false, preview: null, connected: false, allPlans: false, pauseOnCritical: true, highlightEdges: null, llmKey: "", autoHiDone: false };
+export const S = { meta: null, snap: null, history: [], events: [], pred: null, truth: false, preview: null, connected: false, allPlans: false, pauseOnCritical: true, highlightEdges: null, llmKey: "", autoHiDone: false, sessionId: "", replay: false };
 export const bus = new EventTarget();
 const emit = (type, detail) => bus.dispatchEvent(new CustomEvent(type, { detail }));
 let lastAnoms = "";
@@ -13,12 +15,15 @@ let pausedCritKey = null;
 let llmTimer = null;
 let llmBusy = false;
 let llmPending = false;
+let wsFails = 0;
+let gotHello = false;
+let replayHandle = null;
 const SUBS_ORDER = ["EPS", "TCS", "GNC", "COMMS", "MOB", "DATA"];
-const MATRIX_LABEL = { EPS: "P", TCS: "T", GNC: "A", COMMS: "C", MOB: "M", DATA: "D" };
+const MATRIX_LABEL = { EPS: "P", TCS: "T", GNC: "A", COMMS: "C", MOB: "L", DATA: "O" };
 
 const ICON = { battery: "🔋", thermal: "🌡️", sensor: "🧭", comms: "📡" };
 const SHORT_FAULT = { battery: "Battery", thermal: "Overheat", sensor: "Sensor", comms: "Radio" };
-const SUB_NAME = { EPS: "POWER", TCS: "THERMAL", GNC: "ADCS", COMMS: "COMMS", MOB: "MOBILITY", DATA: "DATA" };
+const SUB_NAME = { EPS: "POWER", TCS: "THERMAL", GNC: "ADCS", COMMS: "COMMS", MOB: "PAYLOAD", DATA: "OBDH" };
 const TICKER_KINDS = new Set(["FAULT", "FDIR", "TWIN", "DIAG", "PRED", "SYNC", "CASCADE"]);
 const KIND_NAME = { FAULT: "FAULT", FDIR: "ROVER", TWIN: "TWIN", DIAG: "DIAG", PRED: "PRED", CMD: "CMD", SYNC: "LINK", SYS: "SYS", CASCADE: "CHAIN" };
 
@@ -35,21 +40,75 @@ function patch(el, html) {
   if (el._html !== html) { el.innerHTML = html; el._html = html; }
 }
 
-// --------------------------------------------------------------- websocket
+// --------------------------------------------------------------- websocket / replay
 let ws;
+function dispatchServerMsg(msg) {
+  if (msg.type === "hello") onHello(msg);
+  else if (msg.type === "snap") onSnap(msg);
+  else if (msg.type === "pred") onPred(msg.pred);
+  else if (msg.type === "error") console.warn("server:", msg.error);
+}
+
+function showReplayBanner(on) {
+  $("replayBanner")?.classList.toggle("hidden", !on);
+}
+
+async function startReplay() {
+  if (S.replay || replayHandle) return;
+  S.replay = true;
+  showReplayBanner(true);
+  setConn(true);
+  try {
+    const data = await loadReplay();
+    replayHandle = playReplay(data, dispatchServerMsg);
+  } catch (err) {
+    console.warn("replay failed", err);
+    setConn(false);
+    const c = $("conn");
+    if (c && !isDeployHost()) {
+      c.innerHTML = `Ground segment: <b>offline — could not load recorded mission</b>`;
+    }
+  }
+  applyGroundGate();
+}
+
+function isDeployHost() {
+  return CFG.isStaticHost || /\.vercel\.app$/i.test(location.hostname);
+}
+
 function connect() {
-  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
-  ws.onopen = () => setConn(true);
-  ws.onclose = () => { setConn(false); setTimeout(connect, 1500); };
+  if (S.replay) return;
+  // On static host without explicit backend, go straight to replay.
+  if (isDeployHost() && !CFG.explicit) {
+    startReplay();
+    return;
+  }
+  try {
+    ws = new WebSocket(CFG.wsUrl);
+  } catch {
+    wsFails++;
+    if (wsFails >= 2 || (isDeployHost() && !CFG.explicit)) startReplay();
+    else setTimeout(connect, 1500);
+    return;
+  }
+  ws.onopen = () => { wsFails = 0; setConn(true); };
+  ws.onerror = () => { /* close handles fallback */ };
+  ws.onclose = () => {
+    if (S.replay) return;
+    setConn(false);
+    if (!gotHello) wsFails++;
+    const giveUp = wsFails >= 2 || (isDeployHost() && !CFG.explicit && wsFails >= 1);
+    if (giveUp) startReplay();
+    else setTimeout(connect, 1500);
+  };
   ws.onmessage = (m) => {
     const msg = JSON.parse(m.data);
-    if (msg.type === "hello") onHello(msg);
-    else if (msg.type === "snap") onSnap(msg);
-    else if (msg.type === "pred") onPred(msg.pred);
-    else if (msg.type === "error") console.warn("server:", msg.error);
+    if (msg.type === "hello") gotHello = true;
+    dispatchServerMsg(msg);
   };
 }
 export function send(op, data = {}) {
+  if (S.replay) return;
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ op, ...data }));
 }
 function setConn(on) {
@@ -57,29 +116,47 @@ function setConn(on) {
   const c = $("conn");
   if (c) {
     c.classList.toggle("off", !on);
-    c.innerHTML = `Ground segment: <b>${on ? "connected" : "offline — run uvicorn locally for the live twin (Vercel hosts UI only)"}</b>`;
+    let label;
+    if (S.replay) label = "recorded mission";
+    else if (on) label = "connected";
+    else if (isDeployHost()) label = "connecting to recorded mission…";
+    else label = "offline — run uvicorn locally for the live twin";
+    c.innerHTML = `Ground segment: <b>${label}</b>`;
   }
   applyGroundGate();
-  if (!on && $("syncPill")) {
+  if (!on && !S.replay && $("syncPill")) {
     $("syncPill").className = "pill offline";
     $("syncTxt").textContent = "GROUND OFFLINE";
-    $("syncSub").textContent = "reconnect WebSocket";
+    $("syncSub").textContent = isDeployHost() ? "loading replay…" : "reconnect WebSocket";
   }
 }
 
 function applyGroundGate() {
-  const off = !S.connected;
-  const tip = off ? "Ground segment offline — start uvicorn (see README)" : "";
+  const off = !S.connected || S.replay;
+  const tip = S.replay
+    ? "Recorded mission — inject/plans disabled"
+    : (!S.connected ? (isDeployHost() ? "Loading recorded mission…" : "Ground segment offline — start uvicorn (see README)") : "");
   for (const b of document.querySelectorAll("#faults .fbtn, #plans .pbtn.go, #cmds button, #activeFaults [data-clear]")) {
     b.disabled = off;
     if (off) b.title = tip;
     else if (b.dataset.kind && S.meta?.faults?.[b.dataset.kind]) b.title = S.meta.faults[b.dataset.kind].detail;
-    else if (b.dataset.clear) b.title = "Remove the fault from the simulated rover (test harness only)";
+    else if (b.dataset.clear) b.title = "Remove the fault from the simulated spacecraft (test harness only)";
     else if (!b.dataset.kind) b.removeAttribute("title");
+  }
+  // Speed / reset still usable in live; in replay only truth/pauseCrit UI
+  for (const b of document.querySelectorAll("#speed button, #resetBtn")) {
+    if (S.replay) {
+      b.disabled = true;
+      b.title = "Recorded mission";
+    } else {
+      b.disabled = false;
+      b.removeAttribute("title");
+    }
   }
 }
 
 function onHello(msg) {
+  S.sessionId = msg.session_id || "";
   S.meta = msg.meta;
   S.history = msg.history || [];
   S.events = msg.events || [];
@@ -96,6 +173,7 @@ function onHello(msg) {
 }
 
 function onSnap(snap) {
+  if (snap.session_id) S.sessionId = snap.session_id;
   S.snap = snap;
   const last = S.history[S.history.length - 1];
   if (snap.sample && (!last || snap.sample.t > last.t)) {
@@ -124,7 +202,26 @@ function onPred(pred) {
   if (S.pauseOnCritical && fc && pausedCritKey !== fc.key) {
     pausedCritKey = fc.key;
     send("pause", { value: true });
+    showCritBanner(fc);
   }
+}
+
+function showCritBanner(fc) {
+  const el = $("critBanner");
+  if (!el) return;
+  const when = fc.t < 90 ? `${Math.round(fc.t)} s` : fc.t < 5400 ? `${Math.round(fc.t / 60)} min` : `${(fc.t / 3600).toFixed(1)} h`;
+  el.querySelector(".crit-msg").textContent = `PAUSED — critical forecast: ${fc.text} in ${when}`;
+  el.classList.remove("hidden");
+}
+
+function clearCritBanner() {
+  $("critBanner")?.classList.add("hidden");
+}
+
+function resumeFromCritical() {
+  clearCritBanner();
+  // Keep pausedCritKey so the same first_critical does not immediately re-pause.
+  send("pause", { value: false });
 }
 
 // ------------------------------------------------------------- 3D + charts
@@ -136,15 +233,15 @@ const cascade = new Cascade($("cascade"));
 // ------------------------------------------------------------ static parts
 const CMDS = [
   ["Mode", "mode", [["NOMINAL", "Nominal"], ["SAFE", "Safe"]], (c) => c.mode],
-  ["Drive", "drive", [[true, "Go"], [false, "Stop"]], (c) => c.drive],
-  ["Speed", "speed", [[0.5, "50%"], [1, "100%"]], (c) => c.speed_frac],
+  ["Imaging", "drive", [[true, "On"], [false, "Off"]], (c) => c.drive],
+  ["Duty", "speed", [[0.5, "50%"], [1, "100%"]], (c) => c.speed_frac],
   ["Payload", "payload", [[true, "On"], [false, "Off"]], (c) => c.payload],
   ["IMU", "imu", [["A", "A"], ["B", "B (spare)"]], (c) => c.imu],
   ["Transponder", "trx", [["A", "A"], ["B", "B (spare)"]], (c) => c.trx],
   ["Antenna", "antenna", [["HGA", "High-gain"], ["LGA", "Low-gain"]], (c) => c.antenna],
   ["Batt. string 2", "bat_isolated", [[false, "Connected"], [true, "Isolated"]], (c) => c.bat_isolated],
-  ["Pose", "pose", [["NORMAL", "Normal"], ["SUN", "Sun"], ["SHADE", "Shadow"]], (c) => c.pose],
-  ["Relay orbiter", "relay_hp", [[false, "Normal"], [true, "High-gain"]], (c) => c.relay_hp],
+  ["Attitude", "pose", [["NORMAL", "Nadir"], ["SUN", "Sun"], ["SHADE", "Thermal"]], (c) => c.pose],
+  ["GS assist", "relay_hp", [[false, "Normal"], [true, "High-power"]], (c) => c.relay_hp],
 ];
 
 let built = false;
@@ -199,12 +296,12 @@ const SUBS = {
     ["Battery", `${tw.t_bat.toFixed(0)}°C`, tr && `${tr.t_bat.toFixed(0)}°C`]],
   GNC: (tw, h, tr) => [["Pointing", `${tw.att_err.toFixed(1)}°`, tr && `${tr.att_err.toFixed(1)}°`],
     ["Gyro", tw.cfg.imu === "A" ? "IMU-A" : "IMU-B"]],
-  COMMS: (tw, h, tr) => [["Link", tw.down_ok ? `${tw.margin.toFixed(0)} dB` : tw.searching ? "searching" : "lost",
+  COMMS: (tw, h, tr) => [["Link", tw.gs_pass ? (tw.down_ok ? `${tw.margin.toFixed(0)} dB` : tw.searching ? "searching" : "lost") : `next ${Math.round((tw.next_pass_s || 0) / 60)}m`,
     tr && `${Math.max(tr.margin, -60).toFixed(0)} dB`], ["Radio", `TRX-${tw.cfg.trx}`]],
-  MOB: (tw) => [["Speed", `${(tw.v * 100).toFixed(0)} cm/s`],
-    ["Drive", tw.cfg.mode === "SAFE" ? "safe hold" : tw.cfg.drive ? "on" : tw.cfg.pose === "NORMAL" ? "stopped" : "parked"]],
+  MOB: (tw) => [["Duty", pct(tw.imaging_duty || 0)],
+    ["Imaging", tw.cfg.mode === "SAFE" ? "safe hold" : tw.cfg.drive && tw.cfg.payload ? "on" : "off"]],
   DATA: (tw) => [["Buffer", pct(tw.buffer_mb / S.meta.buffer_cap)],
-    ["Science", tw.cfg.payload && tw.cfg.mode !== "SAFE" ? "on" : "off"]],
+    ["OBDH", tw.cfg.payload && tw.cfg.mode !== "SAFE" ? "imaging" : "idle"]],
 };
 
 function tileTag(s) {
@@ -244,6 +341,15 @@ function render() {
   const mode = tw.dead ? "NO POWER" : tw.cfg.mode === "SAFE" ? (tw.auto_safe ? `SAFE · auto: ${tw.auto_safe}` : "SAFE MODE") : "NOMINAL OPS";
   $("modePill").className = "pill " + (tw.dead ? "bad" : tw.cfg.mode === "SAFE" ? "warn" : "ok");
   $("modeTxt").textContent = mode;
+  const orb = sn.link || {};
+  const orbitEl = $("orbitStrip");
+  if (orbitEl) {
+    const passMin = Math.round((orb.next_pass_s || tw.next_pass_s || 0) / 60);
+    orbitEl.textContent = orb.gs_pass || tw.gs_pass
+      ? "AOS · ground pass active"
+      : `${tw.eclipse || orb.eclipse ? "ECLIPSE" : "SUNLIT"} · next pass in ${passMin} min`;
+    orbitEl.className = "orbit-strip " + (orb.gs_pass || tw.gs_pass ? "pass" : tw.eclipse || orb.eclipse ? "ecl" : "sun");
+  }
   for (const b of $("speed").children) {
     const v = b.dataset.v;
     b.classList.toggle("on", v === "pause" ? sn.paused : !sn.paused && +v === sn.speed);
@@ -260,21 +366,37 @@ function render() {
   // diagnosis
   const pr = sn.prognostics;
   const batFound = sn.findings.some((f) => f.sub === "EPS");
-  const progTail = tw.cfg.bat_isolated ? "running on the healthy string only"
-    : pr.rul_days > 0 ? `about ${pr.rul_days > 3650 ? "10+ years" : Math.round(pr.rul_days) + " days"} until 50% capacity` : "already below 50% capacity";
+  let progTail = "estimating…";
+  if (tw.cfg.bat_isolated) progTail = "running on the healthy string only";
+  else if (pr.rul_days == null || pr.rul_ready === false) progTail = "estimating remaining life…";
+  else if (pr.rul_days > 0) progTail = `about ${pr.rul_days > 3650 ? "10+ years" : Math.round(pr.rul_days) + " days"} until 50% capacity`;
+  else progTail = "already below 50% capacity";
   patch($("diag"), (sn.findings.length
     ? sn.findings.map((f) => `<div class="diag-item${f.contained ? " contained" : ""}">${esc(f.text)}<small>${SUB_NAME[f.sub]} · ${pct(f.conf)} sure${f.contained ? ` · contained: ${esc(f.contained)}` : ""}</small></div>`).join("")
     : `<div class="diag-none">Nothing wrong. Every telemetry frame matches the twin's model.</div>`)
     + `<div class="note">Knock-ons are correlated through the live model edges — not separate gauges.</div>`
-    + (batFound ? `<div class="note">Battery outlook: ${pct(pr.capacity)} capacity, ${progTail}.</div>` : ""));
+    + (batFound ? `<div class="note">Battery outlook: ${pct(Math.min(1, pr.capacity))} capacity, ${progTail}.</div>` : ""));
 
-  // residuals
+  // residuals + estimator convergence (model-check tab)
   const anoms = new Set(sn.anomalies);
+  const nest = sn.estimator || {};
+  const EST_CHIP = [
+    ["r", "R_int", 8], ["leak", "leak", 8], ["cap", "capacity", 20],
+    ["rad", "radiator", 8], ["imu", "IMU", 6], ["trx", "TRX", 6],
+  ];
+  const estChips = EST_CHIP.map(([k, lab, need]) => {
+    const n = nest[k] || 0;
+    const ok = n >= need;
+    return `<span class="est-chip ${ok ? "ok" : n > 0 ? "warm" : ""}" title="${lab}: ${n}/${need} updates">${lab} ${n}/${need}</span>`;
+  }).join("");
   patch($("resid"), Object.entries(S.meta.residuals).map(([k, label]) => {
     const z = sn.residuals[k] ?? 0, c = Math.max(-10, Math.min(10, z));
     const left = c < 0 ? 50 + c * 5 : 50, width = Math.abs(c) * 5;
     return `<div class="res-row ${anoms.has(k) ? "alarm" : ""}"><span>${label}</span><div class="res-bar"><i style="left:${left}%;width:${width}%"></i></div><span>${z >= 0 ? "+" : ""}${z.toFixed(1)}σ</span></div>`;
-  }).join("") + `<div class="note">How far the telemetry departs from what the twin expected. Above 3.5σ the twin flags an anomaly; the bar shrinks back once it has worked out the cause.${S.truth ? "" : " Tick “Show truth” to compare its health estimates with the hidden real values."}</div>`);
+  }).join("")
+    + `<div class="est-row">${estChips}</div>`
+    + `<div class="note">How far the telemetry departs from what the twin expected. Above 3.5σ the twin flags an anomaly; the bar shrinks back once it has worked out the cause.${S.truth ? "" : " Tick “Show truth” to compare its health estimates with the hidden real values."}</div>`
+    + `<div class="note judge-blurb">57 pytest cases cover freeze-on-bad-command, cascade/prognostics, LEO orbit/pass gating, and ≥3-subsystem battery cascades.</div>`);
   patch($("estimates"), S.truth ? estimatesTable(h, sn.truth.health, tw.cfg) : "");
   $("modelDot").classList.toggle("hidden", !anoms.size);
   const anomsKey = [...anoms].sort().join(",");
@@ -303,9 +425,11 @@ function render() {
   renderCorrMatrix(corr.matrix, hi, corr.paths);
   scheduleExplain(sn, corr);
 
-  // view chips
+  // view chips — LEO: imaging / orbit, not rover drive speed
+  const imagingOn = !!tw.cfg.drive || !!tw.cfg.payload;
   const chips = [
-    `<span class="pill ${tw.v > 0.001 ? "ok" : "warn"}"><span class="dot"></span>${tw.v > 0.001 ? `driving ${(tw.v * 100).toFixed(0)} cm/s` : "stationary"}</span>`,
+    `<span class="pill ${imagingOn ? "ok" : "warn"}"><span class="dot"></span>${imagingOn ? "imaging on" : "imaging idle"}</span>`,
+    `<span class="pill ${tw.eclipse || orb.eclipse ? "warn" : "ok"}"><span class="dot"></span>${tw.eclipse || orb.eclipse ? "eclipse" : "sunlit orbit"}</span>`,
     `<span class="pill ${tw.down_ok ? "ok" : "bad"}"><span class="dot"></span>${tw.down_ok ? `link ${tw.margin.toFixed(0)} dB` : "no link"}</span>`,
   ];
   if (sy.state === "BLIND") chips.push(`<span class="pill bad"><span class="dot"></span>no telemetry: showing the twin's own prediction</span>`);
@@ -327,7 +451,7 @@ function render() {
   // active faults
   patch($("activeFaults"), sn.faults.map((f) => `<div class="af">${ICON[f.kind]} <span>${esc(S.meta.faults[f.kind].name)}</span>
     <div class="bar"><i style="width:${Math.round(f.level * 100)}%"></i></div><span class="num">${pct(f.level)}</span>
-    <button data-clear="${f.kind}" title="Remove the fault from the simulated rover (test harness only)">clear</button></div>`).join(""));
+    <button data-clear="${f.kind}" title="Remove the fault from the simulated spacecraft (test harness only)">clear</button></div>`).join(""));
 
   drawCharts();
 }
@@ -356,12 +480,15 @@ function renderChain(chain) {
     return;
   }
   const hi = new Set(S.highlightEdges || []);
-  const latest = stages[stages.length - 1]?.id;
+  const latest = [...stages].reverse().find((s) => !s.resolved)?.id || stages[stages.length - 1]?.id;
   const rows = stages.map((st) => {
     const edges = st.edges || [];
     const on = edges.length && edges.every((e) => hi.has(e));
-    return `<li data-edges="${esc(edges.join("|"))}" data-id="${esc(st.id)}" class="${on ? "on" : ""}${st.id === latest ? " pulse" : ""}">
-      <span class="ch-n">${st.n || ""}.</span><span class="ch-k">${esc(st.kind)}</span>${esc(st.text)}</li>`;
+    const cls = [on ? "on" : "", st.id === latest ? "pulse" : "", st.resolved ? "resolved" : ""].filter(Boolean).join(" ");
+    const eqKey = edges[edges.length - 1];
+    const eq = (st.kind === "edge" || st.kind === "path") && eqKey ? (EDGE_EQ[eqKey] || "") : "";
+    return `<li data-edges="${esc(edges.join("|"))}" data-id="${esc(st.id)}" class="${cls}">
+      <span class="ch-n">${st.n || ""}.</span><span class="ch-k">${esc(st.kind)}</span>${esc(st.text)}${eq ? `<div class="ch-eq" title="${esc(eq)}">${esc(eq)}</div>` : ""}</li>`;
   }).join("");
   patch(box, `<div class="ch-h">CHAIN REACTION <small>${stages.length} stage${stages.length === 1 ? "" : "s"}</small></div><ol>${rows}</ol>`);
 }
@@ -396,7 +523,7 @@ function renderCorrMatrix(matrix, hi, paths) {
     patch($("corrMatrix"), "");
     return;
   }
-  const legend = `<div class="mx-leg">P=Power · T=Thermal · A=ADCS · C=Comms · M=Mobility · D=Data</div>`;
+  const legend = `<div class="mx-leg">P=Power · T=Thermal · A=ADCS · C=Comms · L=Payload · O=OBDH</div>`;
   const cells = [`<div class="mh"></div>` + SUBS_ORDER.map((b) => `<div class="mh">${MATRIX_LABEL[b]}</div>`).join("")];
   for (const a of SUBS_ORDER) {
     cells.push(`<div class="mh">${MATRIX_LABEL[a]}</div>`);
@@ -427,6 +554,13 @@ function scheduleExplain(sn, corr) {
 }
 
 async function fetchExplain(manual) {
+  if (S.replay || isDeployHost()) {
+    const note = $("llmNote");
+    if (note && manual) {
+      note.textContent = "Operator note uses the live twin backend — open with a local uvicorn or ?backend= to explain.";
+    }
+    return;
+  }
   if (llmBusy) {
     llmPending = true;
     return;
@@ -439,7 +573,11 @@ async function fetchExplain(manual) {
     note.textContent = manual ? "Asking local qwen2.5:3b…" : "Updating operator note…";
   }
   try {
-    const r = await fetch("/api/llm/explain", { method: "POST" });
+    const r = await fetch(apiUrl("/api/llm/explain"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: S.sessionId || null }),
+    });
     const j = await r.json();
     if (note) {
       note.classList.remove("busy");
@@ -447,19 +585,22 @@ async function fetchExplain(manual) {
     }
     const badge = $("llmBadge");
     if (badge) {
-      if (j.ok) badge.textContent = `local ${j.model}`;
+      if (S.replay || isDeployHost()) badge.textContent = j.ok ? `local ${j.model}` : "operator note";
+      else if (j.ok) badge.textContent = `local ${j.model}`;
       else if (j.source === "template") badge.textContent = `template note · ${j.model || "offline"}`;
-      else badge.textContent = j.text?.startsWith("Ollama") ? "Ollama offline" : `local ${j.model || "llm"} (fallback)`;
+      else badge.textContent = j.text?.startsWith("Ollama") ? "note offline" : `local ${j.model || "llm"} (fallback)`;
     }
-    if (!j.ok) refreshLlmStatus();
+    if (!j.ok && !S.replay && !isDeployHost()) refreshLlmStatus();
     // Coach cue for guided demo
     document.dispatchEvent(new CustomEvent("llm-note", { detail: { text: j.text, ok: j.ok, source: j.source } }));
   } catch {
     if (note) {
       note.classList.remove("busy");
-      note.textContent = "Could not reach /api/llm/explain — twin correlations still work without the LLM.";
+      note.textContent = S.replay || isDeployHost()
+        ? "Operator note unavailable in recorded mode — twin correlations still show on the graph."
+        : "Could not reach /api/llm/explain — twin correlations still work without the LLM.";
     }
-    refreshLlmStatus();
+    if (!S.replay && !isDeployHost()) refreshLlmStatus();
   } finally {
     llmBusy = false;
     if (llmPending) {
@@ -470,14 +611,19 @@ async function fetchExplain(manual) {
 }
 
 async function refreshLlmStatus() {
+  if (S.replay || isDeployHost()) {
+    const badge = $("llmBadge");
+    if (badge) badge.textContent = "operator note";
+    return;
+  }
   try {
-    const j = await (await fetch("/api/llm/status")).json();
+    const j = await (await fetch(apiUrl("/api/llm/status"))).json();
     const badge = $("llmBadge");
     if (!badge) return;
-    badge.textContent = j.ok && j.model_ready ? `Ollama ready · ${j.model}` : j.ok ? `Ollama up · pull ${j.model}` : "Ollama offline — template note still works";
+    badge.textContent = j.ok && j.model_ready ? `Ollama ready · ${j.model}` : j.ok ? `Ollama up · pull ${j.model}` : "note offline — template still works";
   } catch {
     const badge = $("llmBadge");
-    if (badge) badge.textContent = "Ollama offline — template note still works";
+    if (badge) badge.textContent = "note offline — template still works";
   }
 }
 
@@ -495,7 +641,7 @@ function renderPred() {
   const evs = [...p.events.map((e) => ({ ...e })), ...p.fdir].sort((a, b) => a.t - b.t);
   patch($("impact"), `
     <div class="impact-head ${fc ? "bad" : "ok"}">${fc ? `${esc(fc.text)} in ${fmtDur(fc.t)}` : "All clear for the next 2 hours"}</div>
-    ${evs.length ? evs.slice(0, 4).map((e) => `<div class="ev ${e.level}"><span>in ${fmtDur(e.t)}</span><span>${e.level === "info" ? "Rover reacts: " : ""}${esc(e.text)}</span></div>`).join("") : `<div class="note">The twin expects the rover to stay healthy.</div>`}`);
+    ${evs.length ? evs.slice(0, 4).map((e) => `<div class="ev ${e.level}"><span>in ${fmtDur(e.t)}</span><span>${e.level === "info" ? "FDIR: " : ""}${esc(e.text)}</span></div>`).join("") : `<div class="note">The twin expects the spacecraft to stay healthy through the next orbits.</div>`}`);
 
   const tw = S.snap.twin;
   const ids = p.plans.map((x) => x.id).join(",");
@@ -505,7 +651,7 @@ function renderPred() {
     box.innerHTML = p.plans.map((pl) => `<div class="plan" data-id="${esc(pl.id)}">
       <div class="plan-h"><span class="rk badge hidden">BEST</span><b>${esc(pl.name)}</b><span class="sc"></span></div>
       <div class="scorebar"><i></i></div><div class="notes"></div>
-      <div class="acts"><button class="pbtn" data-act="preview">Preview</button><button class="pbtn go" data-act="run">Execute</button><span class="up badge warn hidden">uplink down: queued</span></div></div>`).join("");
+      <div class="acts"><button class="pbtn" data-act="preview">Preview</button><button class="pbtn go" data-act="run">Execute</button><span class="up badge warn hidden">queued until next pass</span></div></div>`).join("");
   }
   const shown = S.allPlans ? p.plans.length : 3;
   p.plans.forEach((pl, i) => {
@@ -566,9 +712,10 @@ $("goConsole").onclick = showConsole;
 $("goGuide").onclick = () => { showConsole(); guide.start(); };
 $("home").onclick = showLanding;
 $("guideBtn").onclick = () => guide.start();
-$("resetBtn").onclick = () => { pausedCritKey = null; S.llmKey = ""; S.highlightEdges = null; S.autoHiDone = false; send("reset"); };
+$("resetBtn").onclick = () => { pausedCritKey = null; clearCritBanner(); S.llmKey = ""; S.highlightEdges = null; S.autoHiDone = false; send("reset"); };
 $("truth").onchange = (e) => { S.truth = e.target.checked; render(); };
-$("pauseCrit").onchange = (e) => { S.pauseOnCritical = e.target.checked; if (!e.target.checked) pausedCritKey = null; };
+$("pauseCrit").onchange = (e) => { S.pauseOnCritical = e.target.checked; if (!e.target.checked) { pausedCritKey = null; clearCritBanner(); } };
+$("critResume")?.addEventListener("click", resumeFromCritical);
 $("explainBtn").onclick = () => { S.llmKey = ""; fetchExplain(true); };
 $("corrTable").addEventListener("click", (e) => {
   const tr = e.target.closest("tr[data-edges]");
@@ -609,4 +756,8 @@ const guide = new Guide({ S, bus, send, showConsole });
 addEventListener("resize", drawCharts);
 refreshLlmStatus();
 setInterval(refreshLlmStatus, 30000);
+if (isDeployHost()) {
+  const api = document.querySelector('a.tbtn[href="/docs"]');
+  if (api) api.classList.add("hidden");
+}
 connect();

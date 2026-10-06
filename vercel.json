@@ -5,6 +5,6 @@
   "buildCommand": "echo 'static frontend — no build'",
   "outputDirectory": "frontend",
   "rewrites": [
-    { "source": "/((?!css/|js/|vendor/|docs/).*)", "destination": "/index.html" }
+    { "source": "/((?!css/|js/|vendor/|docs/|assets/).*)", "destination": "/index.html" }
   ]
 }

@@ -11,18 +11,18 @@ PATH_DEPTH = 3
 EDGE_SHORT = {
     "EPS>TCS": "battery heat",
     "TCS>EPS": "thermal load on power",
-    "TCS>GNC": "gyro drift from heat",
+    "TCS>GNC": "gyro / wheel friction from heat",
     "TCS>COMMS": "radio thermal derate",
-    "TCS>MOB": "thermal speed limit",
-    "EPS>GNC": "brownout sensor noise",
+    "TCS>MOB": "thermal payload inhibit",
+    "EPS>GNC": "brownout wheel torque cap",
     "EPS>COMMS": "low-bus radio loss",
-    "EPS>MOB": "low-SOC speed limit",
+    "EPS>MOB": "SOC payload shed",
     "GNC>COMMS": "antenna mispointing",
-    "GNC>EPS": "VO compute power",
-    "GNC>MOB": "drive halt on attitude",
+    "GNC>EPS": "ADCS compute power",
+    "GNC>MOB": "pointing kills imaging",
     "COMMS>EPS": "signal-search power",
-    "COMMS>DATA": "buffer fill",
-    "MOB>EPS": "drive power",
+    "COMMS>DATA": "OBDH buffer fill",
+    "MOB>EPS": "payload power",
 }
 
 

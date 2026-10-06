@@ -1,24 +1,28 @@
 """Timed cascading-loss stages from confirmed twin diagnoses only."""
 from __future__ import annotations
 
+from collections import defaultdict
+
 EDGE_LIT = 0.12
 
 EDGE_TEXT = {
     "EPS>TCS": "Pack heat lights EPS→TCS — battery warming the thermal node",
-    "TCS>GNC": "Heat reaches ADCS — gyro drift coupling lights",
+    "TCS>GNC": "Heat reaches ADCS — gyro drift / wheel friction",
     "TCS>COMMS": "Thermal derate hits COMMS — radio margin under pressure",
-    "TCS>MOB": "Thermal speed limit engages on mobility",
-    "EPS>GNC": "Brownout noise hits ADCS sensors",
+    "TCS>MOB": "Thermal limit inhibits payload imaging",
+    "EPS>GNC": "Brownout caps reaction-wheel torque",
     "EPS>COMMS": "Low bus voltage weakens the radio",
-    "EPS>MOB": "Low SOC limits drive speed",
+    "EPS>MOB": "Low SOC sheds payload imaging",
     "GNC>COMMS": "Attitude error mispoints the antenna",
-    "GNC>EPS": "Visual-odometry fallback burns extra power",
-    "GNC>MOB": "Attitude knowledge forces a drive halt",
+    "GNC>EPS": "ADCS compute draws extra power",
+    "GNC>MOB": "Poor pointing kills imaging quality",
     "COMMS>EPS": "Signal search draws extra power",
-    "COMMS>DATA": "Downlink lost — science buffer filling",
-    "MOB>EPS": "Drive motors taxing the battery",
+    "COMMS>DATA": "Off-pass / link lost — OBDH buffer filling",
+    "MOB>EPS": "Payload and wheels taxing the battery",
     "TCS>EPS": "Thermal load feeds back onto power",
 }
+
+KIND_ORDER = {"root": 0, "edge": 1, "path": 2, "sub": 3, "loss": 4, "fdir": 5, "recovery": 6}
 
 
 def _live_edge_text(edge: str, couplings: dict) -> str:
@@ -27,6 +31,14 @@ def _live_edge_text(edge: str, couplings: dict) -> str:
     if isinstance(val, (list, tuple)) and len(val) > 1 and val[1]:
         return f"{base} ({val[1]})"
     return base
+
+
+def _root_text(sub: str, findings: list[dict]) -> str:
+    parts = [f.get("text") or "fault detected" for f in findings if f.get("sub") == sub and not f.get("contained")]
+    if not parts:
+        parts = [f.get("text") or "fault detected" for f in findings if f.get("sub") == sub]
+    body = "; ".join(parts) if parts else "fault detected"
+    return f"ROOT on {sub}: {body}"
 
 
 class CascadeTracker:
@@ -41,18 +53,36 @@ class CascadeTracker:
             "down_ok": True,
             "mode": "NOMINAL",
         }
+        self._live_findings: list[dict] = []
+        self._live_subs: list[dict] = []
+        self._live_coup: dict = {}
 
     def reset(self) -> None:
         self.stages.clear()
         self.seen.clear()
         self._prev = {"drive": True, "payload": True, "down_ok": True, "mode": "NOMINAL"}
+        self._live_findings = []
+        self._live_subs = []
+        self._live_coup = {}
 
     def _renumber(self) -> None:
+        self.stages.sort(key=lambda st: (KIND_ORDER.get(st["kind"], 9), st.get("t", 0), st["id"]))
         for i, st in enumerate(self.stages, 1):
             st["n"] = i
 
+    def _stage(self, sid: str) -> dict | None:
+        return next((s for s in self.stages if s["id"] == sid), None)
+
     def _add(self, sid: str, t: float, kind: str, text: str, sub: str = "",
              edges: list[str] | None = None, finding_id: str = "") -> dict | None:
+        existing = self._stage(sid)
+        if existing is not None:
+            if existing.get("resolved"):
+                existing["resolved"] = False
+                existing["text"] = text
+                existing["t"] = round(t, 1)
+                return existing  # re-opened — treat as noteworthy
+            return None
         if sid in self.seen:
             return None
         self.seen.add(sid)
@@ -64,26 +94,37 @@ class CascadeTracker:
             "text": text,
             "edges": edges or [],
             "finding_id": finding_id,
+            "resolved": False,
             "n": len(self.stages) + 1,
         }
         self.stages.append(stage)
         return stage
 
-    def _prune(self, confirmed: list[dict], correlations: dict) -> list[dict]:
-        """Drop stages whose root is gone or whose edge is no longer active."""
-        conf_ids = {f.get("id") for f in confirmed if not f.get("contained")}
-        conf_subs = {f.get("sub") for f in confirmed if not f.get("contained")}
+    def _resolve(self, confirmed: list[dict], correlations: dict, t: float) -> list[dict]:
+        """Mark stages resolved when roots clear/contain — keep history."""
+        active_subs = {f.get("sub") for f in confirmed if not f.get("contained")}
+        contained = {f.get("sub"): f.get("contained") for f in confirmed if f.get("contained")}
+        # Cleared entirely (no finding left for a former root sub)
         active = set(correlations.get("active") or [])
-        retracted: list[dict] = []
-        keep: list[dict] = []
+        newly: list[dict] = []
         for st in self.stages:
+            if st.get("resolved"):
+                continue
             drop = False
             if st["kind"] == "root":
-                fid = st.get("finding_id") or (st["id"].split(":")[-1] if ":" in st["id"] else "")
-                if fid not in conf_ids:
+                sub = st.get("sub") or ""
+                if sub not in active_subs:
                     drop = True
+                    if sub in contained:
+                        rec = self._add(
+                            f"recovery:{sub}", t, "recovery",
+                            f"Recovery: fault on {sub} contained ({contained[sub]})",
+                            sub=sub, finding_id=st.get("finding_id", ""),
+                        )
+                        if rec:
+                            newly.append(rec)
             elif st["kind"] in ("edge", "path", "sub"):
-                if not conf_subs:
+                if not active_subs:
                     drop = True
                 elif st["kind"] == "edge":
                     edge = st["id"][5:] if st["id"].startswith("edge:") else (st.get("edges") or [""])[0]
@@ -93,18 +134,11 @@ class CascadeTracker:
                     edges = st.get("edges") or []
                     if not edges or not all(e in active for e in edges):
                         drop = True
-                elif st["kind"] == "sub" and st.get("sub") and st["sub"] in conf_subs:
-                    drop = False  # root sub itself ok
-                elif st["kind"] == "sub" and not conf_subs:
-                    drop = True
             if drop:
-                self.seen.discard(st["id"])
-                retracted.append(st)
-            else:
-                keep.append(st)
-        self.stages = keep
+                st["resolved"] = True
+                newly.append(st)
         self._renumber()
-        return retracted
+        return newly
 
     def update(
         self,
@@ -116,8 +150,12 @@ class CascadeTracker:
         view: dict,
         fdir_texts: list[str] | None = None,
     ) -> dict:
-        """`findings` must be confirmed diagnoses only. Returns {new, retracted}."""
-        retracted = self._prune(findings or [], correlations or {})
+        """`findings` must be confirmed diagnoses only. Returns {new, resolved}."""
+        self._live_findings = list(findings or [])
+        self._live_subs = list(subsystems or [])
+        self._live_coup = couplings or {}
+
+        resolved = self._resolve(findings or [], correlations or {}, t)
         new: list[dict] = []
         cfg = view.get("cfg") or {}
         if hasattr(cfg, "drive"):
@@ -128,23 +166,32 @@ class CascadeTracker:
             mode = cfg.get("mode", "NOMINAL")
         down_ok = bool(view.get("down_ok", True))
 
-        conf_subs = {f.get("sub") for f in (findings or []) if not f.get("contained")}
+        active_findings = [f for f in (findings or []) if not f.get("contained")]
+        conf_subs = {f.get("sub") for f in active_findings}
 
-        # 1) Confirmed root findings
-        for f in findings or []:
-            if f.get("contained"):
+        # 1) One ROOT per subsystem (merge finding texts)
+        by_sub: dict[str, list[dict]] = defaultdict(list)
+        for f in active_findings:
+            by_sub[f.get("sub") or ""].append(f)
+        for sub, flist in by_sub.items():
+            if not sub:
                 continue
-            sub = f.get("sub") or ""
-            fid = f.get("id") or ""
-            sid = f"root:{sub}:{fid}"
-            text = f"ROOT on {sub}: {f.get('text', 'fault detected')}"
-            st = self._add(sid, t, "root", text, sub=sub, edges=[], finding_id=fid)
+            fid = flist[0].get("id") or ""
+            text = _root_text(sub, flist)
+            st = self._add(f"root:{sub}", t, "root", text, sub=sub, finding_id=fid)
             if st:
                 new.append(st)
+            else:
+                # Refresh text on existing active root
+                existing = self._stage(f"root:{sub}")
+                if existing and not existing.get("resolved"):
+                    existing["text"] = text
+                    existing["finding_id"] = fid
 
         if not conf_subs:
             self._prev = {"drive": drive, "payload": payload, "down_ok": down_ok, "mode": mode}
-            return {"new": new, "retracted": retracted}
+            self._renumber()
+            return {"new": new, "retracted": resolved, "resolved": resolved}
 
         # 2) Lit correlation edges (from confirmed-root paths only)
         active = correlations.get("active") or []
@@ -187,7 +234,7 @@ class CascadeTracker:
 
         # 4) Capability losses (only while a confirmed root exists)
         if self._prev["drive"] and not drive:
-            st = self._add("loss:drive", t, "loss", "Capability loss: drive commanded off / halted",
+            st = self._add("loss:drive", t, "loss", "Capability loss: payload imaging inhibited",
                            sub="MOB", edges=["GNC>MOB", "TCS>MOB", "EPS>MOB"])
             if st:
                 new.append(st)
@@ -197,7 +244,7 @@ class CascadeTracker:
             if st:
                 new.append(st)
         if self._prev["down_ok"] and not down_ok:
-            st = self._add("loss:link", t, "loss", "Capability loss: downlink lost",
+            st = self._add("loss:link", t, "loss", "Capability loss: downlink lost / off-pass",
                            sub="COMMS", edges=["GNC>COMMS", "TCS>COMMS", "EPS>COMMS"])
             if st:
                 new.append(st)
@@ -205,34 +252,54 @@ class CascadeTracker:
         # 5) FDIR
         if self._prev["mode"] != "SAFE" and mode == "SAFE":
             st = self._add("fdir:SAFE", t, "fdir",
-                           "FDIR: autonomous SAFE mode — drive/payload inhibited",
+                           "FDIR: autonomous SAFE — sun-point, payload inhibited",
                            sub="EPS", edges=[])
             if st:
                 new.append(st)
         for msg in fdir_texts or []:
             low = msg.lower()
-            if "halt" in low or ("attitude" in low and "stop" in low):
+            if "imaging" in low or "inhibit" in low or "halt" in low:
                 st = self._add("fdir:halt", t, "fdir", f"FDIR: {msg}", sub="GNC", edges=["GNC>MOB"])
                 if st:
                     new.append(st)
-            elif "safe mode" in low or "autonomous safe" in low:
+            elif "safe mode" in low or "autonomous safe" in low or "momentum" in low:
                 st = self._add("fdir:SAFE", t, "fdir", f"FDIR: {msg}", sub="EPS", edges=[])
                 if st:
                     new.append(st)
 
         self._prev = {"drive": drive, "payload": payload, "down_ok": down_ok, "mode": mode}
-        return {"new": new, "retracted": retracted}
+        self._renumber()
+        return {"new": new, "retracted": resolved, "resolved": resolved}
 
-    def snapshot(self, couplings: dict | None = None) -> dict:
-        """Refresh edge stage text from live coupling labels when provided."""
+    def snapshot(self, couplings: dict | None = None,
+                 findings: list[dict] | None = None,
+                 subsystems: list[dict] | None = None) -> dict:
+        """Refresh stage text from live findings/couplings/subsystem causes."""
+        coup = couplings if couplings is not None else self._live_coup
+        finds = findings if findings is not None else self._live_findings
+        subs = {s["id"]: s for s in (subsystems if subsystems is not None else self._live_subs)}
         stages = []
         for st in self.stages:
             s = dict(st)
-            if s["kind"] == "edge" and s.get("edges") and couplings is not None:
-                s["text"] = _live_edge_text(s["edges"][0], couplings)
+            kind = s["kind"]
+            if kind == "root" and not s.get("resolved"):
+                sub = s.get("sub") or ""
+                s["text"] = _root_text(sub, finds)
+            elif kind == "edge" and s.get("edges"):
+                s["text"] = _live_edge_text(s["edges"][0], coup)
+                if s.get("resolved") and not s["text"].startswith("Resolved:"):
+                    s["text"] = f"Resolved: {s['text']}"
+            elif kind == "sub" and not s.get("resolved"):
+                sub = subs.get(s.get("sub") or "")
+                if sub and sub.get("cause"):
+                    s["text"] = f"Loss cascading into {sub['id']}: {sub['cause']}"
+            elif kind == "root" and s.get("resolved") and not str(s.get("text", "")).startswith("Resolved:"):
+                s["text"] = f"Resolved: {s['text']}"
             stages.append(s)
+        active = [x for x in stages if not x.get("resolved")]
+        latest = (active[-1] if active else stages[-1] if stages else None)
         return {
             "stages": stages,
-            "latest": stages[-1]["text"] if stages else "",
-            "playing": [s["id"] for s in stages],
+            "latest": latest["text"] if latest else "",
+            "playing": [x["id"] for x in stages],
         }
