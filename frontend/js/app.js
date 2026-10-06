@@ -32,7 +32,8 @@ const MATRIX_LABEL = { EPS: "P", TCS: "T", GNC: "A", COMMS: "C", MOB: "L", DATA:
 
 const ICON = { battery: "🔋", thermal: "🌡️", sensor: "🧭", comms: "📡" };
 const SHORT_FAULT = { battery: "Battery", thermal: "Overheat", sensor: "Sensor", comms: "Radio" };
-const SUB_NAME = { EPS: "POWER", TCS: "THERMAL", GNC: "ADCS", COMMS: "COMMS", MOB: "PAYLOAD", DATA: "OBDH" };
+const SUB_NAME = { EPS: "EPS", TCS: "TCS", GNC: "ADCS", COMMS: "COMMS", MOB: "PAYLOAD", DATA: "OBDH" };
+const ST_ICON = { NOMINAL: "●", WATCH: "○", WARNING: "▲", CRITICAL: "◆" };
 const TICKER_KINDS = new Set(["FAULT", "FDIR", "TWIN", "DIAG", "PRED", "SYNC", "CASCADE"]);
 const KIND_NAME = { FAULT: "FAULT", FDIR: "SAT", TWIN: "TWIN", DIAG: "DIAG", PRED: "PRED", CMD: "CMD", SYNC: "LINK", SYS: "SYS", CASCADE: "CHAIN" };
 
@@ -313,10 +314,36 @@ function buildStatic() {
     const b = e.target.closest("[data-kind]");
     if (b && S.connected) send("inject", { kind: b.dataset.kind, severity: +$("sev").value, ramp: +$("ramp").value });
   });
-  $("morePlans").addEventListener("click", () => { S.allPlans = !S.allPlans; renderPred(); });
+  $("morePlans").addEventListener("click", () => {
+    S.allPlans = !S.allPlans;
+    if (S.allPlans) openDrawer("residPanel");
+    renderPred();
+  });
   document.querySelector("#morePanel .tabbar").addEventListener("click", (e) => {
     const b = e.target.closest("[data-tab]");
     if (b) showTab(b.dataset.tab);
+  });
+  $("drawerToggle")?.addEventListener("click", () => {
+    const d = $("morePanel");
+    if (d.classList.contains("collapsed")) openDrawer();
+    else closeDrawer();
+  });
+  $("moreMenuBtn")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const m = $("moreMenu");
+    const open = m.classList.toggle("hidden") === false;
+    $("moreMenuBtn").setAttribute("aria-expanded", open ? "true" : "false");
+  });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(".menu-wrap")) {
+      $("moreMenu")?.classList.add("hidden");
+      $("moreMenuBtn")?.setAttribute("aria-expanded", "false");
+    }
+  });
+  $("playPauseBtn")?.addEventListener("click", () => send("pause", { value: !S.snap?.paused }));
+  $("speedSelect")?.addEventListener("change", (e) => {
+    send("pause", { value: false });
+    send("speed", { value: +e.target.value });
   });
   $("activeFaults").addEventListener("click", (e) => {
     const b = e.target.closest("[data-clear]");
@@ -377,6 +404,19 @@ export function showTab(id) {
   for (const p of document.querySelectorAll("#morePanel .tab-pane")) p.classList.toggle("on", p.id === id);
 }
 
+function openDrawer(tab) {
+  const d = $("morePanel");
+  d.classList.remove("collapsed");
+  $("drawerToggle")?.setAttribute("aria-expanded", "true");
+  if (tab) showTab(tab);
+  requestAnimationFrame(drawCharts);
+}
+
+function closeDrawer() {
+  $("morePanel").classList.add("collapsed");
+  $("drawerToggle")?.setAttribute("aria-expanded", "false");
+}
+
 function render() {
   const sn = S.snap;
   if (!sn || !S.meta) return;
@@ -384,18 +424,15 @@ function render() {
   scene.truthOn = S.truth;
   scene.setState(tw, sn.truth, sn.speed);
 
-  // top bar
+  // top bar — merged status pill (still write syncTxt / modeTxt)
   $("met").textContent = "MET " + fmtMET(sn.t);
+  const sy = sn.sync || {};
   if (S.connected) {
-    const sy = sn.sync;
-    const syncCls = { SYNCED: "ok", "LOW RATE": "warn", INIT: "warn", BLIND: "bad" }[sy.state];
-    $("syncPill").className = "pill " + syncCls;
-    $("syncTxt").textContent = sy.state === "BLIND" ? "TWIN BLIND" : `TWIN ${sy.state}`;
+    $("syncTxt").textContent = sy.state === "BLIND" ? "TWIN BLIND" : (sy.state || "INIT");
     $("syncSub").textContent = sy.age == null || sy.state === "SYNCED" ? "" : sy.state === "BLIND"
       ? `no telemetry for ${fmtDur(sy.age)}`
-      : `${sy.rate.toFixed(0)} kbps`;
+      : `${(sy.rate || 0).toFixed(0)} kbps`;
   }
-  const sy = sn.sync;
   const worst = (sn.subsystems || []).reduce((w, s) => {
     const rank = { CRITICAL: 4, WARNING: 3, WATCH: 2, NOMINAL: 1 };
     return (rank[s.status] || 0) > (rank[w?.status] || 0) ? s : w;
@@ -407,10 +444,23 @@ function render() {
   else if (worst?.status === "CRITICAL" || (worst && worst.score < 30)) mode = "CRITICAL";
   else if (tw.cfg.mode === "SAFE") mode = tw.auto_safe ? `SAFE · auto: ${tw.auto_safe}` : "SAFE MODE";
   else if (worst?.status === "WARNING") mode = "DEGRADED";
-  else mode = "NOMINAL OPS";
+  else mode = "NOMINAL";
   const modeBad = tw.dead || linkBad || worst?.status === "CRITICAL" || (worst && worst.score < 30);
-  $("modePill").className = "pill " + (modeBad ? "bad" : tw.cfg.mode === "SAFE" || worst?.status === "WARNING" ? "warn" : "ok");
+  const modeWarn = tw.cfg.mode === "SAFE" || worst?.status === "WARNING" || worst?.status === "WATCH";
+  const syncCls = { SYNCED: "ok", "LOW RATE": "warn", INIT: "warn", BLIND: "bad" }[sy.state] || "warn";
+  const pillCls = modeBad ? "bad" : modeWarn || syncCls === "warn" ? "warn" : syncCls === "bad" ? "bad" : "ok";
   $("modeTxt").textContent = mode;
+  const syncShort = $("syncTxt").textContent || "INIT";
+  const merged = $("statusMerged");
+  if (merged) merged.textContent = `${mode} · ${syncShort}`;
+  const statusPill = $("statusPill");
+  if (statusPill) statusPill.className = "pill " + pillCls;
+  $("syncPill").className = "pill sr-only " + syncCls;
+  $("modePill").className = "pill sr-only " + (modeBad ? "bad" : modeWarn ? "warn" : "ok");
+
+  const hasFault = !!(sn.faults?.length || (sn.findings || []).some((f) => !f.contained));
+  $("console").classList.toggle("has-fault", hasFault);
+
   const orb = sn.link || {};
   const orbitEl = $("orbitStrip");
   if (orbitEl) {
@@ -424,14 +474,34 @@ function render() {
     const v = b.dataset.v;
     b.classList.toggle("on", v === "pause" ? sn.paused : !sn.paused && +v === sn.speed);
   }
+  const pp = $("playPauseBtn");
+  if (pp) pp.textContent = sn.paused ? "▶" : "II";
+  const sel = $("speedSelect");
+  if (sel && !sn.paused) {
+    const opts = [...sel.options].map((o) => +o.value);
+    if (opts.includes(sn.speed)) sel.value = String(sn.speed);
+  }
 
-  // subsystems
+  // compact subsystem tiles
   const subs = Object.fromEntries(sn.subsystems.map((s) => [s.id, s]));
-  patch($("subs"), Object.entries(SUBS).map(([id, kv]) => {
+  patch($("subs"), Object.keys(SUBS).map((id) => {
     const s = subs[id];
-    return `<div class="sub ${s.status}" title="${esc(s.cause || "")}"><div class="sub-h"><b>${SUB_NAME[id]}</b><span class="score">${s.score}</span></div>
-      <div class="kv">${kv(tw, h, tr).map(([k, v, t]) => `<div><span>${k}</span><span>${v}${t ? `<span class="tr">${t}</span>` : ""}</span></div>`).join("")}</div>${tileTag(s)}</div>`;
+    const st = s?.status || "NOMINAL";
+    return `<div class="sub ${st}" title="${esc(s?.cause || "")}"><div class="sub-h"><b>${SUB_NAME[id]}</b><span class="score">${s?.score ?? "—"}</span></div>
+      <div class="sub-st">${ST_ICON[st] || "●"} ${st}</div></div>`;
   }).join(""));
+
+  // story line under cascade
+  const story = $("storyLine");
+  if (story) {
+    const find = (sn.findings || []).find((f) => !f.contained) || (sn.findings || [])[0];
+    const fc = S.pred?.first_critical;
+    const rec = S.pred?.plans?.[0];
+    const diag = find ? find.text : "All systems nominal";
+    const next = fc ? `${fc.text} in ${fmtDur(fc.t)}` : (orb.gs_pass || tw.gs_pass ? "ground pass active" : `next pass in ${Math.round((orb.next_pass_s || tw.next_pass_s || 0) / 60)} min`);
+    const recTxt = rec ? rec.name : "—";
+    story.textContent = `Diagnosis: ${diag} · Next: ${next} · Fix: ${recTxt}`;
+  }
 
   // diagnosis
   const pr = sn.prognostics;
@@ -479,7 +549,7 @@ function render() {
   const anomsKey = [...anoms].sort().join(",");
   if (anoms.size && anomsKey !== lastAnoms) {
     lastAnoms = anomsKey;
-    showTab("residPanel");
+    // Do not auto-open MORE drawer — keep main screen clean
   }
   if (!anoms.size) lastAnoms = "";
 
@@ -767,13 +837,14 @@ function renderPred() {
   const aw = actNowVsWait(p, S.snap.twin?.next_pass_s || S.snap.link?.next_pass_s);
   const awBox = $("actWait");
   if (awBox && aw) {
-    patch(awBox, `
+    patch(awBox, `<div class="aw-summary">If we wait: ${esc(aw.wait.name)} · score ${aw.wait.score.toFixed(0)} · next pass ~${aw.wait.nextPassMin} min</div>
       <div class="aw act"><h4>ACT NOW</h4><b>${esc(aw.act.name)}</b>
         <div>score ${aw.act.score.toFixed(0)} · peak ${aw.act.maxTb?.toFixed(0) ?? "—"}°C · min SoC ${pct(aw.act.minSoc ?? 0)}</div>
         <div class="note">${esc(aw.act.why)}</div></div>
       <div class="aw wait"><h4>WAIT FOR NEXT PASS</h4><b>${esc(aw.wait.name)}</b>
         <div>score ${aw.wait.score.toFixed(0)} · peak ${aw.wait.maxTb?.toFixed(0) ?? "—"}°C · min SoC ${pct(aw.wait.minSoc ?? 0)} · next ~${aw.wait.nextPassMin} min</div>
         <div class="note">${esc(aw.wait.why)}</div></div>`);
+    awBox.classList.add("folded");
   }
 
   const tw = S.snap.twin;
@@ -792,6 +863,7 @@ function renderPred() {
     if (!el) return;
     const m = pl.metrics;
     el.classList.toggle("hidden", i >= shown && S.preview !== pl.id);
+    el.classList.toggle("collapsed", i > 0 && !S.allPlans && S.preview !== pl.id);
     el.title = `${pl.plain}\nLowest charge ${pct(m.min_soc)} · battery peak ${m.max_t_bat.toFixed(0)}°C · avionics peak ${m.max_t_av.toFixed(0)}°C · link up ${pct(m.link_frac)}`;
     el.classList.toggle("best", i === 0 && pl.id !== "continue");
     el.classList.toggle("preview", S.preview === pl.id);
@@ -816,6 +888,7 @@ function renderPred() {
   more.classList.toggle("hidden", p.plans.length <= 3);
   more.textContent = S.allPlans ? "Show fewer" : `Show all ${p.plans.length} options`;
 }
+
 
 function addLog(e) {
   const d = document.createElement("div");
@@ -939,7 +1012,7 @@ addEventListener("resize", drawCharts);
 refreshLlmStatus();
 setInterval(refreshLlmStatus, 30000);
 if (isDeployHost()) {
-  const api = document.querySelector('a.tbtn[href="/docs"]');
+  const api = document.querySelector('#moreMenu a[href="/docs"]');
   if (api) api.classList.add("hidden");
 }
 connect();
