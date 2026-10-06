@@ -40,6 +40,9 @@ class Mission:
         self._forecasts: list[dict] = []
         self._backtest_errs: list[float] = []
         self._csv_replay = False  # pause plant frames while CSV drives twin
+        self._incident_prev: dict | None = None
+        self._plan_state: dict = {}  # {plan_id, state, at_t}
+        self._last_event_texts: dict[str, float] = {}  # text -> last emit t (dedupe)
         self.log("SYS", "Mission start: LEO EO smallsat — ~500 km, 95 min orbit, ground-station passes")
         if store:
             store.reset()
@@ -106,6 +109,12 @@ class Mission:
                 self.store.twin(sample)
 
     def log(self, kind: str, text: str) -> None:
+        # Dedupe identical event text within 10 s sim time
+        key = f"{kind}:{text}"
+        last = self._last_event_texts.get(key)
+        if last is not None and self.t - last < 10.0:
+            return
+        self._last_event_texts[key] = self.t
         self.event_seq += 1
         e = {"id": self.event_seq, "t": self.t, "kind": kind, "text": text}
         self.events.append(e)
@@ -247,8 +256,10 @@ class Mission:
         if not plan:
             raise ValueError(f"unknown plan {plan_id!r}")
         self.log("CMD", f"Executing recovery plan: {plan['name']}")
+        self._plan_state = {"plan_id": plan_id, "state": "QUEUED", "at_t": self.t}
         for name, value in plan["cmds"]:
             self.command(name, value, source="plan")
+        self._plan_state = {"plan_id": plan_id, "state": "EXECUTED", "at_t": self.t}
 
     # ------------------------------------------------------------ prediction
     def prediction_inputs(self) -> tuple:
@@ -427,7 +438,11 @@ class Mission:
         }
 
     def meta(self) -> dict:
+        from .viewmodel import PROTOCOL_VERSION, static_model
+        m = static_model(self.p)
         return {
+            "protocol_version": PROTOCOL_VERSION,
+            "model": m,
             "faults": FAULTS, "limits": LIMITS,
             "plans": [{"id": p["id"], "name": p["name"], "plain": p["plain"]} for p in PLANS],
             "residuals": {k: v[0] for k, v in RESIDUALS.items()},
@@ -441,16 +456,36 @@ class Mission:
                 "gs_mask_deg": self.p.gs_mask_deg,
                 "gs_pass_every_n_orbits": self.p.gs_pass_every_n_orbits,
             },
-            "assumptions": [
-                "Circular LEO; Bengaluru GS — not full ephemeris.",
-                "1 Hz plant/twin step; pass-gated TM/TC only.",
-                "Twin never reads the plant — only frames + its own model.",
-            ],
+            "assumptions": m["assumptions"],
         }
 
     def snapshot(self) -> dict:
+        from .viewmodel import compute_incident, compute_ops, compute_timeline
+
         tw = self.twin
         f = tw.last_frame
+        # Advance plan_state to CONFIRMED when uplink cmds confirm
+        if self._plan_state.get("state") == "EXECUTED":
+            cmds = [c for c in self.commands if c.get("source") == "plan"]
+            if cmds and all(c.get("status") == "confirmed" for c in cmds[-4:]):
+                self._plan_state = {**self._plan_state, "state": "CONFIRMED", "at_t": self.t}
+
+        subs = tw.subsystems()
+        findings = tw.confirmed_findings()
+        cfg = tw.view().get("cfg") or {}
+        ops = compute_ops(subs, cfg)
+        incident = compute_incident(
+            t=self.t,
+            findings=findings,
+            couplings=tw.o.get("couplings") or {},
+            subsystems=subs,
+            prediction=self.prediction,
+            plan_state=self._plan_state,
+            prev=self._incident_prev,
+        )
+        self._incident_prev = incident
+        timeline = compute_timeline(self.t, self.p)
+
         return {
             "t": self.t, "speed": self.speed, "paused": self.paused,
             "twin": tw.view(), "truth": self.truth(),
@@ -466,7 +501,7 @@ class Mission:
                 "sunlit": bool(tw.o.get("sunlit", True)),
                 "eclipse": bool(tw.o.get("eclipse", False)),
             },
-            "subsystems": tw.subsystems(), "findings": tw.confirmed_findings(),
+            "subsystems": subs, "findings": findings,
             "residuals": {k: round(v, 2) for k, v in tw.z.items()},
             "estimator": dict(tw.n_est),
             "anomalies": sorted(tw.active_anoms),
@@ -474,8 +509,8 @@ class Mission:
             "correlations": tw.correlations(),
             "cascade_chain": self.cascade.snapshot(
                 tw.o.get("couplings") or {},
-                tw.confirmed_findings(),
-                tw.subsystems(),
+                findings,
+                subs,
             ),
             "prognostics": tw.prognostics(),
             "faults": [{"kind": k, "severity": fl.severity, "level": fl.level(self.t)}
@@ -484,4 +519,34 @@ class Mission:
             "pred_seq": self.pred_seq,
             "backtest": self.backtest_view(),
             "_histSoc": self.hist_soc_depth(),
+            "ops": ops,
+            "incident": incident,
+            "timeline": timeline,
         }
+
+    def backtest_report(self) -> dict:
+        """Rolling backtest table for GET /api/backtest."""
+        done = [f for f in self._forecasts if f.get("resolved")]
+        by_h: dict[float, list[float]] = {}
+        rows = []
+        for f in done[-40:]:
+            h = float(f.get("offset_s") or 600)
+            by_h.setdefault(h, []).append(float(f["err_pct"]))
+            rows.append({
+                "issued_t": f["issued_t"],
+                "horizon_s": h,
+                "predicted": f["predicted"],
+                "actual": f.get("actual"),
+                "delta": f.get("delta"),
+                "err_pct": f.get("err_pct"),
+                "key": f.get("key", "t_bat"),
+            })
+        summary = []
+        for h, errs in sorted(by_h.items()):
+            n = len(errs)
+            mae = sum(errs) / n
+            bias = sum(
+                (r["delta"] or 0) for r in rows if abs(r["horizon_s"] - h) < 1e-6
+            ) / max(n, 1)
+            summary.append({"horizon_s": h, "n": n, "mae_pct": round(mae, 2), "bias": round(bias, 3)})
+        return {"rows": rows, "summary": summary, "latest": self.backtest_view()}

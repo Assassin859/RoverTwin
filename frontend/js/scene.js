@@ -83,11 +83,11 @@ export class TwinScene {
     sg.setAttribute("position", new THREE.Float32BufferAttribute(sp, 3));
     S.add(new THREE.Points(sg, new THREE.PointsMaterial({ color: 0xddeeff, size: 1.4, sizeAttenuation: false })));
 
-    // Earth — brighter for venue projectors
-    this.earth = mesh(new THREE.SphereGeometry(EARTH_R, 64, 64), mat(0x2a8fd4, { roughness: 0.75, metalness: 0.08 }));
+    // Earth
+    this.earth = mesh(new THREE.SphereGeometry(EARTH_R, 64, 64), mat(0x1a5f9e, { roughness: 0.85, metalness: 0.05 }));
     S.add(this.earth);
     const land = mesh(new THREE.SphereGeometry(EARTH_R + 0.02, 64, 64),
-      new THREE.MeshStandardMaterial({ color: 0x3cb371, transparent: true, opacity: 0.65, roughness: 1 }));
+      new THREE.MeshStandardMaterial({ color: 0x2d8a4e, transparent: true, opacity: 0.45, roughness: 1 }));
     land.scale.set(1, 0.92, 1);
     this.earth.add(land);
     // night side hint via emissive rim

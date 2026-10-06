@@ -8,7 +8,7 @@ SatTwin (repo: RoverTwin) is a **telemetry-synchronised LEO Earth-observation sm
 
 The twin never reads the simulated spacecraft's state. It only sees telemetry frames, as a ground segment would (enforced by `tests/test_twin.py`). “Show truth” in the UI is a **test harness** overlay for fidelity checks — never the twin’s belief.
 
-Judge deck (4 traps answered): [`docs/RoverTwin-ST09.pptx`](docs/RoverTwin-ST09.pptx).
+Judge deck (4 traps answered): [`docs/SatTwin-ST09.pptx`](docs/SatTwin-ST09.pptx) (alias [`docs/RoverTwin-ST09.pptx`](docs/RoverTwin-ST09.pptx)).
 
 ## ST-09 cross-check
 
@@ -50,7 +50,7 @@ flowchart LR
   E --> D["Diagnosis<br/>root cause vs knock-on"]
   T --> PR["Predictor<br/>ensemble + recovery plan simulation"]
   T & D & PR --> API["FastAPI<br/>WebSocket 10 Hz + REST + SQLite"]
-  API --> UI["Operator console (Three.js)<br/>+ guided demo"]
+  API --> UI["Operator console (React + R3F)<br/>+ guided demo"]
   UI -- "inject / command / plan" --> API
 ```
 
@@ -151,7 +151,7 @@ Open <http://localhost:8000>. Each browser console gets a **private** WebSocket 
 
 ### Static UI on Vercel
 
-`frontend/` deploys to Vercel. Without a reachable FastAPI host the site **plays a recorded battery-cascade mission** (`frontend/assets/demo-replay.json.gz`) with a banner: *Live backend offline — playing recorded mission*.
+`frontend/` deploys to Vercel as a static console. The served UI is the **Phase-4 / PR #1 vanilla frontend** (`index.html`, `css/`, `js/` — RoverTwin branding; no legacy `evidence.js`); optional Vite+React under `frontend/src/` is not mounted by uvicorn or Vercel by default. Without a reachable FastAPI host the site **plays a recorded battery-cascade mission** (`frontend/assets/demo-replay.json.gz`) with a banner that live control needs the backend.
 
 ```bash
 npx vercel --prod
@@ -163,7 +163,7 @@ Point the static UI at a live backend (CORS-enabled uvicorn):
 https://rovertwin.vercel.app/?backend=http://127.0.0.1:8000
 ```
 
-`?backend=` accepts `http(s)://host:port` or `ws(s)://host`; the value is also stored in `localStorage.rovertwinBackend`.
+`?backend=` accepts `http(s)://host:port`; also stored in `localStorage` (classic console key).
 
 Backend CORS allows `https://rovertwin.vercel.app` and localhost. Extra origins: env `ROVERTWIN_CORS` (comma-separated).
 
@@ -171,9 +171,6 @@ Re-record the offline demo (after physics/UI changes):
 
 ```bash
 python scripts/record_replay.py
-```
-
-```bash
 python -m pytest -q
 ```
 
@@ -208,21 +205,23 @@ python scripts/build_pptx.py
 
 ## Demo script (3 minutes)
 
-**Spoken (judges):** “Six coupled subsystems — EPS, TCS, GNC≈ADCS, COMMS. Twin ≠ dashboard: same physics, frames only. Watch the lit edge — that is an equation.”
+**Spoken (judges):** “Six coupled subsystems — EPS, TCS, ADCS, COMMS, PAYLOAD, OBDH. Twin ≠ dashboard: same physics, frames only. Watch the lit edge — that is an equation.”
 
-1. **Landing → 3-min judge path.** Resets the mission; intro says ground ↔ relay ↔ rover and twin ≠ dashboard **before** any fault.
-2. **RUN BATTERY DEMO** (or pick Battery). Residual bar spikes; diagnosis; lit multi-hop on HOW IT SPREADS (table + 6×6 matrix); OPERATOR NOTE narrates twin facts.
-3. **Prediction.** Pauses on first critical (e.g. battery above 50°C); ensemble bands on charts.
-4. **Decide.** Hover plans to preview; execute top plan — uplink through the relay.
-5. **Mission report.** What happened / what the twin did / FDIR before uplink / how to minimise.
-6. **Truth (test harness)** — optional fidelity check only; not what operators trust day-to-day.
+1. **Landing → Start judge demo (3 min)** (`/?` → `/control?demo=1`). Coach strip walks Mirror → Break → Predict → Recover → Report.
+2. **Inject battery** (or auto). Incident card + cascade hops; hop explainer shows KaTeX equations.
+3. **Prediction.** Ops pill + forecast headline; timeline markers; pause on critical.
+4. **Plans.** Top plan score breakdown; Compare all; Execute at next AOS.
+5. **Mission report.** Root, hops, plans, outcome.
+6. **Evidence** (`/evidence`) for Q1/Q3/Q4 + CSV ingest. **Model** (`/model`) for full equations.
 
-## Answers to the judges' questions
+### ST-09 on-screen map
 
-- **Which 3+ subsystems, and what equations connect them?** Six subsystems (EPS, TCS, GNC, COMMS, MOB, DATA), connected by the equations above and drawn live as the coupling graph.
-- **Inject battery degradation: where does it show up next, and why?** Battery temperature rises first (internal short plus 5× resistance means more I²R heat). Heat then conducts into the avionics through \(G_{ab}\). SOC drains faster because of the leak. If nothing is done, the battery crosses 50°C and onboard autonomy forces SAFE mode, stopping science. The twin recommends isolating the bad string: half the capacity, but no more heat.
-- **Synchronised to telemetry, or a standalone simulation?** Synchronised. The twin only ingests frames that arrive over a 2.6 s, rate-limited, lossy link. It reports SYNCED / LOW RATE / BLIND, grows its uncertainty while blind, and re-locks after a blackout. Silence itself is used as evidence.
-- **How did you check believability?** `tests/` checks that each fault propagates along the expected edges, and that the twin's estimates converge on the hidden truth. Headless results 40 min after onset: battery leak 56 W vs 58 W true, resistance ×5.18 vs ×5.25, capacity 62% vs 62%. Radiator efficiency 0.377 vs 0.37. Gyro bias 0.108 vs 0.108°/s. Nominal runs raise no false diagnoses. The truth harness lets anyone compare live.
+| Question | Where |
+| --- | --- |
+| Q1 subsystems + equations | Cascade graph + hop popover; Evidence Q1; Model page |
+| Q2 battery next + why | Incident card Next line; active EPS→TCS hop chip |
+| Q3 sync vs standalone | Header sync badge; Evidence Q3; twin vs TM charts |
+| Q4 validation | Evidence Q4 (`/api/validate`, `/api/backtest`) |
 
 ## Project layout
 
@@ -238,20 +237,15 @@ backend/
   store.py     SQLite time-series store
   app.py       FastAPI: WebSocket /ws, REST /api/*, static frontend
 frontend/
-  index.html, css/style.css
-  assets/demo-replay.json.gz   offline Vercel recorded mission
-  js/config.js    ?backend= / apiBase / wsUrl
-  js/replay.js    gzip replay player
-  js/app.js       console state, WebSocket, panels, correlations, LLM note
-  js/scene.js     Three.js LEO Earth + spacecraft
-  js/charts.js    telemetry / twin / prediction / plan charts
-  js/cascade.js   live fault-propagation graph (path highlight)
-  js/edges.js     shared edge stories + equation tooltips
-  js/guide.js     guided demo + mission report
+  index.html, css/, js/        Phase-4 / PR1 vanilla console (served by app.py + Vercel)
+  vendor/                     three.js
+  assets/demo-replay.json.gz  offline Vercel recorded mission
+  src/                        optional Vite+React (not served by default)
 scripts/
   record_replay.py   regenerate frontend/assets/demo-replay.json.gz
 docs/
-  RoverTwin-ST09.pptx   judge slides (4 traps)
+  SatTwin-ST09.pptx     judge slides (architecture + 4 traps)
+  RoverTwin-ST09.pptx   alias of the same deck
   assets/               GIF + stills
 scripts/
   smoke.sh / smoke.ps1  cold-start + pytest + /api/state

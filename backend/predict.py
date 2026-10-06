@@ -15,7 +15,27 @@ from __future__ import annotations
 import copy
 import random
 
-from .model import GROUND_COMMANDS, LIMITS, Health, Params, State, apply_command, clamp, step
+from .model import GROUND_COMMANDS, LIMITS, Health, Params, State, apply_command, clamp, orbit_state, step
+
+# Primary target subsystem for UI filtering
+PLAN_TARGET = {
+    "continue": None,
+    "safe": "EPS",
+    "shed": "EPS",
+    "isolate": "EPS",
+    "shade": "TCS",
+    "imu_b": "GNC",
+    "trx_b": "COMMS",
+    "lga": "COMMS",
+    "resume": "COMMS",
+}
+
+
+def _next_aos_t(t: float, p: Params, up_ok: bool = False) -> float:
+    if up_ok:
+        return t
+    st = orbit_state(t, p)
+    return t + float(st.get("next_pass_s") or 0.0)
 
 PLANS = [
     {"id": "continue", "name": "Do nothing", "cmds": [],
@@ -219,31 +239,46 @@ def _trend_penalty(ser: dict) -> tuple[float, list[str]]:
 
 
 def score(m: dict, p: Params, horizon: float, ser: dict | None = None, cost: float = 0.0,
-          relevance: float = 0.0) -> tuple[float, list[str]]:
-    """End-state-aware safety score. Peak pack temp + end state dominate ties."""
+          relevance: float = 0.0) -> tuple[float, list[str], dict]:
+    """End-state-aware safety score. Returns (total, notes, breakdown)."""
     safety, notes = 55.0, []
+    thermal = 0.0
+    power = 0.0
+    pointing = 0.0
+    data = 0.0
     # Continuous temp / SoC / pointing — no shared late flat penalty
-    safety -= max(0.0, m["max_t_av"] - 55.0) * 1.5
-    safety -= max(0.0, m["max_t_bat"] - 38.0) * 2.2
-    safety -= max(0.0, m.get("end_t_bat", m["max_t_bat"]) - 40.0) * 1.0
-    safety -= max(0.0, m.get("max_att", 0) - 4.0) * 1.2
+    d_tav = max(0.0, m["max_t_av"] - 55.0) * 1.5
+    d_tb = max(0.0, m["max_t_bat"] - 38.0) * 2.2
+    d_tb2 = max(0.0, m.get("end_t_bat", m["max_t_bat"]) - 40.0) * 1.0
+    d_att = max(0.0, m.get("max_att", 0) - 4.0) * 1.2
+    safety -= d_tav + d_tb + d_tb2
+    thermal -= d_tav + d_tb + d_tb2
+    safety -= d_att
+    pointing -= d_att
     if ser:
         pen, tn = _trend_penalty(ser)
         safety -= pen
         notes += tn
     if m["dead"]:
         safety -= 60
+        power -= 30
         notes.append("spacecraft loses power")
     if m["min_soc"] < 0.18:
-        safety -= 10 + 25 * clamp((0.18 - m["min_soc"]) / 0.18, 0, 1)
+        d_soc = 10 + 25 * clamp((0.18 - m["min_soc"]) / 0.18, 0, 1)
+        safety -= d_soc
+        power -= d_soc
         notes.append(f"battery falls to {m['min_soc']:.0%}")
     if m["max_t_bat"] > LIMITS["t_bat_max"]:
-        safety -= min(40.0, 14 + (m["max_t_bat"] - LIMITS["t_bat_max"]) * 3.0)
+        d = min(40.0, 14 + (m["max_t_bat"] - LIMITS["t_bat_max"]) * 3.0)
+        safety -= d
+        thermal -= d
         notes.append(f"battery reaches {m['max_t_bat']:.0f}°C")
     elif m["max_t_bat"] > 55:
         notes.append(f"battery peaks at {m['max_t_bat']:.0f}°C")
     if m["max_t_av"] > LIMITS["t_av_max"]:
-        safety -= min(30.0, 10 + (m["max_t_av"] - LIMITS["t_av_max"]) * 2)
+        d = min(30.0, 10 + (m["max_t_av"] - LIMITS["t_av_max"]) * 2)
+        safety -= d
+        thermal -= d
         notes.append(f"avionics reach {m['max_t_av']:.0f}°C")
     if ser and ser.get("margin"):
         end_m = float(ser["margin"][-1])
@@ -251,16 +286,29 @@ def score(m: dict, p: Params, horizon: float, ser: dict | None = None, cost: flo
     # Prefer cooler / higher SoC end-states (breaks off-pass ties)
     safety += clamp((50.0 - m.get("end_t_bat", m["max_t_bat"])) * 0.35, -8.0, 8.0)
     safety += clamp((m.get("end_soc", m["min_soc"]) - 0.4) * 20.0, -6.0, 6.0)
+    power += clamp((m.get("end_soc", m["min_soc"]) - 0.4) * 20.0, -6.0, 6.0)
+    thermal += clamp((50.0 - m.get("end_t_bat", m["max_t_bat"])) * 0.35, -8.0, 8.0)
     comms = 20.0 * m["link_frac"]
     if m["link_frac"] < 0.25:
         notes.append(f"in contact {m['link_frac']:.0%} of the time (pass windows)")
     sci_den = max(p.science_mb_s * horizon * 0.3, 1e-6)
     ret = 12.0 * clamp(0.2 * m["dist"] / max(p.v_nom * horizon, 1e-6) + 0.8 * m["sci"] / sci_den, 0, 1)
+    data += ret
     if m["sci"] > 0:
         notes.append(f"science returned {m['sci']:.1f} MB")
     if not notes:
         notes.append("all limits respected")
-    return round(max(0.0, safety) + comms + ret - cost + relevance, 1), notes
+    total = round(max(0.0, safety) + comms + ret - cost + relevance, 1)
+    breakdown = {
+        "safety": round(max(0.0, safety), 1),
+        "power": round(power, 1),
+        "thermal": round(thermal, 1),
+        "data": round(data + comms * 0.3, 1),
+        "pointing": round(pointing, 1),
+        "relevance": round(relevance, 1),
+        "cost": round(-cost, 1),
+    }
+    return total, notes, breakdown
 
 
 def plan_cost(cmds: list) -> float:
@@ -323,22 +371,35 @@ def predict_all(s: State, h: Health, up_ok: bool, unc: dict, p: Params, terrain:
 
     if not has_findings:
         cont = next(pl for pl in PLANS if pl["id"] == "continue")
-        sc, notes = score(base["metrics"], p, horizon, base["series"], 0.0, 0.0)
+        sc, notes, br = score(base["metrics"], p, horizon, base["series"], 0.0, 0.0)
+        aos = _next_aos_t(s.t, p, up_ok)
         quiet = {
             "id": cont["id"],
             "name": "No action needed",
+            "title": "No action needed",
             "plain": cont["plain"],
             "why": "twin is nominal — no recovery needed",
+            "why_one_line": "twin is nominal — no recovery needed",
             "cmds": [],
             "score": sc,
+            "score_breakdown": br,
             "notes": ["twin is nominal — no recovery needed"],
             "metrics": base["metrics"],
+            "end_state": {
+                "peak_t_bat": base["metrics"]["max_t_bat"],
+                "min_soc": base["metrics"]["min_soc"],
+                "safe_mode_at": None,
+                "data_lost_mb": 0.0,
+            },
             "events": base["events"][:8],
             "series": base["series"],
             "end_margin": _end_margin(base["series"]),
             "delivered": None,
             "blocked": False,
             "needs_uplink": False,
+            "target_subsystem": None,
+            "relevance": 0.0,
+            "delivery": {"next_aos_t": aos, "executes_at_t": aos},
         }
         fc = _first_forecast(base["events"])
         return {
@@ -347,8 +408,10 @@ def predict_all(s: State, h: Health, up_ok: bool, unc: dict, p: Params, terrain:
             "fdir": [e for e in base["events"] if e["key"] == "fdir"][:6],
             "first_critical": fc,
             "plans": [quiet], "recommended": "continue",
+            "roots": [],
         }
 
+    aos = _next_aos_t(s.t, p, up_ok)
     results = []
     for plan in PLANS:
         if plan["id"] != "continue" and not applicable(plan, s, roots):
@@ -356,18 +419,33 @@ def predict_all(s: State, h: Health, up_ok: bool, unc: dict, p: Params, terrain:
         r = base if plan["id"] == "continue" else simulate(
             s, h, p, plan["cmds"], up_ok, horizon, terrain=terrain, sample=30.0)
         rel = relevance_adjust(plan["id"], roots, plan["cmds"])
-        sc, notes = score(r["metrics"], p, horizon, r["series"], plan_cost(plan["cmds"]), rel)
+        sc, notes, br = score(r["metrics"], p, horizon, r["series"], plan_cost(plan["cmds"]), rel)
+        exec_at = aos if plan["cmds"] else None
+        tgt = PLAN_TARGET.get(plan["id"])
         results.append({
-            "id": plan["id"], "name": plan["name"], "plain": plan["plain"],
-            "why": plan_why(plan, notes), "cmds": plan["cmds"],
-            "score": sc, "notes": notes, "metrics": r["metrics"], "events": r["events"][:8],
+            "id": plan["id"], "name": plan["name"], "title": plan["name"],
+            "plain": plan["plain"],
+            "why": plan_why(plan, notes), "why_one_line": plan_why(plan, notes),
+            "cmds": plan["cmds"],
+            "score": sc, "score_breakdown": br, "notes": notes,
+            "metrics": r["metrics"],
+            "end_state": {
+                "peak_t_bat": r["metrics"]["max_t_bat"],
+                "min_soc": r["metrics"]["min_soc"],
+                "safe_mode_at": None,
+                "data_lost_mb": 0.0,
+            },
+            "events": r["events"][:8],
             "series": r["series"], "end_margin": _end_margin(r["series"]),
             "delivered": r["delivered"], "blocked": r["blocked"],
             "needs_uplink": any(n not in GROUND_COMMANDS for n, _ in plan["cmds"]),
             "relevance": rel,
+            "target_subsystem": tgt,
+            "delivery": {"next_aos_t": aos, "executes_at_t": exec_at if plan["id"] != "continue" else None},
         })
 
-    ranked = sorted((r for r in results if r["id"] != "continue"), key=lambda r: -r["score"])
+    ranked = sorted((r for r in results if r["id"] != "continue"), key=lambda r: (-r["score"], -r.get("relevance", 0)))
+    # Break remaining ties deterministically by id
     cont = next(r for r in results if r["id"] == "continue")
     if len(ranked) >= 2 and ranked[1]["score"] > cont["score"]:
         merged = dict(ranked[0]["cmds"])
@@ -376,21 +454,32 @@ def predict_all(s: State, h: Health, up_ok: bool, unc: dict, p: Params, terrain:
         cmds = list(merged.items())
         r = simulate(s, h, p, cmds, up_ok, horizon, terrain=terrain, sample=30.0)
         rel = relevance_adjust("combo:" + ranked[0]["id"] + "+" + ranked[1]["id"], roots, cmds)
-        sc, notes = score(r["metrics"], p, horizon, r["series"], plan_cost(cmds), rel)
+        sc, notes, br = score(r["metrics"], p, horizon, r["series"], plan_cost(cmds), rel)
         if sc > ranked[0]["score"] + 1:
             results.append({
                 "id": "combo:" + ranked[0]["id"] + "+" + ranked[1]["id"],
                 "name": f"{ranked[0]['name']} + {_lc(ranked[1]['name'])}",
+                "title": f"{ranked[0]['name']} + {_lc(ranked[1]['name'])}",
                 "plain": ranked[0]["plain"] + " Also: " + _lc(ranked[1]["plain"]),
                 "why": plan_why({"plain": ranked[0]["plain"]}, notes),
-                "cmds": cmds, "score": sc, "notes": notes, "metrics": r["metrics"],
+                "why_one_line": plan_why({"plain": ranked[0]["plain"]}, notes),
+                "cmds": cmds, "score": sc, "score_breakdown": br, "notes": notes,
+                "metrics": r["metrics"],
+                "end_state": {
+                    "peak_t_bat": r["metrics"]["max_t_bat"],
+                    "min_soc": r["metrics"]["min_soc"],
+                    "safe_mode_at": None,
+                    "data_lost_mb": 0.0,
+                },
                 "events": r["events"][:8], "series": r["series"],
                 "end_margin": _end_margin(r["series"]),
                 "delivered": r["delivered"], "blocked": r["blocked"], "needs_uplink": True,
                 "relevance": rel,
+                "target_subsystem": ranked[0].get("target_subsystem"),
+                "delivery": {"next_aos_t": aos, "executes_at_t": aos},
             })
 
-    results.sort(key=lambda r: (-r["score"], -(r.get("end_margin") or -99), plan_cost(r.get("cmds") or []), r["id"]))
+    results.sort(key=lambda r: (-r["score"], -(r.get("relevance") or 0), -(r.get("end_margin") or -99), plan_cost(r.get("cmds") or []), r["id"]))
     # Wait = same top recovery delayed to next-next pass (~1 orbit after next AOS)
     delayed = None
     top = next((r for r in results if r["id"] != "continue"), None)
@@ -399,11 +488,12 @@ def predict_all(s: State, h: Health, up_ok: bool, unc: dict, p: Params, terrain:
         dr = simulate(s, h, p, top["cmds"], False, horizon, terrain=terrain, sample=30.0,
                       force_delay_s=delay)
         rel = relevance_adjust(top["id"], roots, top["cmds"])
-        dsc, dnotes = score(dr["metrics"], p, horizon, dr["series"], plan_cost(top["cmds"]), rel)
+        dsc, dnotes, dbr = score(dr["metrics"], p, horizon, dr["series"], plan_cost(top["cmds"]), rel)
         delayed = {
-            "id": top["id"], "name": top["name"], "score": dsc, "notes": dnotes,
-            "why": plan_why(top, dnotes), "metrics": dr["metrics"],
+            "id": top["id"], "name": top["name"], "score": dsc, "score_breakdown": dbr,
+            "notes": dnotes, "why": plan_why(top, dnotes), "metrics": dr["metrics"],
             "delivered": dr["delivered"], "delay_s": delay,
+            "delivery": {"next_aos_t": aos + delay, "executes_at_t": aos + delay},
         }
     fc = _first_forecast(base["events"])
     # Once already past threshold in twin state, announce "now"

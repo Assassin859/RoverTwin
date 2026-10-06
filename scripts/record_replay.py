@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 from backend.mission import Mission  # noqa: E402
 
 OUT = ROOT / "frontend" / "assets" / "demo-replay.json.gz"
+OUT_PUBLIC = ROOT / "frontend" / "public" / "assets" / "demo-replay.json.gz"
 MAX_WALL = 170.0  # seconds — leave headroom under 3 min
 
 
@@ -39,7 +40,11 @@ def _thin_pred(pred: dict | None) -> dict | None:
     out["baseline"] = series
     plans = []
     for p in pred.get("plans") or []:
-        pl = {k: p[k] for k in ("id", "name", "plain", "why", "score", "notes", "metrics", "cmds", "blocked", "needs_uplink", "delivered", "end_margin") if k in p}
+        pl = {k: p[k] for k in (
+            "id", "name", "title", "plain", "why", "why_one_line", "score", "score_breakdown",
+            "target_subsystem", "relevance", "notes", "metrics", "cmds", "blocked",
+            "needs_uplink", "delivered", "end_margin", "end_state", "delivery",
+        ) if k in p}
         ser = {}
         for k, arr in (p.get("series") or {}).items():
             if isinstance(arr, list) and len(arr) > 20:
@@ -211,10 +216,12 @@ def main() -> None:
         "messages": messages,
     }
     OUT.parent.mkdir(parents=True, exist_ok=True)
+    OUT_PUBLIC.parent.mkdir(parents=True, exist_ok=True)
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    with gzip.open(OUT, "wb", compresslevel=9) as f:
-        f.write(raw)
-    print(f"wrote {OUT} ({OUT.stat().st_size} bytes, {len(messages)} messages, sim t={m.t:.0f}s, wall={messages[-1]['t_wall']:.1f}s)")
+    for dest in (OUT, OUT_PUBLIC):
+        with gzip.open(dest, "wb", compresslevel=9) as f:
+            f.write(raw)
+        print(f"wrote {dest} ({dest.stat().st_size} bytes, {len(messages)} messages, sim t={m.t:.0f}s, wall={messages[-1]['t_wall']:.1f}s)")
 
 
 if __name__ == "__main__":

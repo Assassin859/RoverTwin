@@ -33,44 +33,13 @@ export const EDGE_EQ = {
   "MOB>EPS": "P_payload + P_wheels on the bus",
 };
 
-/** Short on-graph chip (<= ~14 chars): live value only. Full equation stays in tooltip + Evidence table. */
-const N = "([-\u2212]?\\d+(?:\\.\\d+)?)";
-const grab = (v, pre, post) => {
-  const m = new RegExp(pre + N + post).exec(v);
-  return m ? m[1] : null;
-};
-const CHIP_FMT = {
-  "EPS>TCS": (v) => { const n = grab(v, "", "\\s*W"); return n ? `heat ${n.replace(/^[-\u2212]/, "")} W` : "heat"; },
-  "TCS>EPS": (v) => {
-    const n = grab(v, "heaters\\s*", "\\s*W");
-    if (n) return `heat ${n} W`;
-    const t = grab(v, "at\\s*", "");
-    return t ? `bat ${t}\u00b0C` : "tax";
-  },
-  "TCS>GNC": (v) => { const n = grab(v, "drift\\s*", ""); return n ? `drift ${n}\u00b0/s` : "drift"; },
-  "TCS>COMMS": (v) => { const n = grab(v, "", "\\s*dB"); return n ? `${n} dB` : "derate"; },
-  "TCS>MOB": () => "inhibit",
-  "EPS>GNC": (v) => { const n = grab(v, "bus\\s*", ""); return n ? `bus ${n} V` : "bus"; },
-  "EPS>COMMS": (v) => { const n = grab(v, "", "\\s*dB"); return n ? `${n} dB` : "bus dB"; },
-  "EPS>MOB": (v) => { const n = grab(v, "SOC\\s*", ""); return n ? `shed ${n}%` : "shed"; },
-  "GNC>COMMS": (v) => { const n = grab(v, "", "\\s*dB"); return n ? `${n} dB` : "point"; },
-  "GNC>EPS": (v) => { const n = grab(v, "", "\\s*W"); return n ? `+${n.replace(/^[-\u2212]/, "")} W` : "+W"; },
-  "GNC>MOB": (v) => { const n = grab(v, "pointing\\s*", ""); return n ? `point ${n}\u00b0` : "point"; },
-  "COMMS>EPS": (v) => { const n = grab(v, "", "\\s*W"); return n ? `+${n.replace(/^[-\u2212]/, "")} W` : "search"; },
-  "COMMS>DATA": (v) => { const n = grab(v, "", "%"); return n ? `buf ${n}%` : "buffer"; },
-  "MOB>EPS": (v) => { const n = grab(v, "", "\\s*W"); return n ? `load ${n.replace(/^[-\u2212]/, "")} W` : "load"; },
-};
-
-export function edgeChip(key, live) {
-  const v = String(live || "").trim();
-  const f = CHIP_FMT[key];
-  const out = f ? f(v) : (v ? v.slice(0, 14) : key.split(">")[0]);
-  return out.length > 16 ? `${out.slice(0, 15)}\u2026` : out;
-}
-
-/** Short on-graph label: chip text (full eq only in tooltip). */
+/** Short on-graph label: equation token + live coupling value. */
 export function edgeLabel(key, live) {
-  return edgeChip(key, live);
+  const eq = EDGE_EQ[key] || key;
+  const short = eq.length > 36 ? eq.slice(0, 34) + "…" : eq;
+  const v = (live || "").trim();
+  if (!v) return short;
+  return `${short} · ${v}`;
 }
 
 /** Full tooltip: story + equation + live value. */

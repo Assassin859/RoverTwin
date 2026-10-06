@@ -98,9 +98,11 @@ class Hub:
         return None
 
     def hello(self, sess: Session) -> dict:
+        from .viewmodel import PROTOCOL_VERSION
         m = sess.mission
         return {
             "type": "hello",
+            "protocol_version": PROTOCOL_VERSION,
             "session_id": sess.id,
             "meta": m.meta(),
             "history": list(m.history),
@@ -331,6 +333,13 @@ def get_validate(session_id: str | None = None) -> dict:
     return m.validation_report()
 
 
+@app.get("/api/backtest", summary="Stored forecast backtests vs later telemetry")
+def get_backtest(session_id: str | None = None) -> dict:
+    sess = hub.session_by_id(session_id)
+    m = sess.mission if sess else hub.mission
+    return m.backtest_report()
+
+
 @app.get("/api/faults", summary="Fault types that can be injected")
 def get_faults() -> dict:
     return FAULTS
@@ -468,4 +477,7 @@ def ingest_csv(body: CsvIngestBody) -> dict:
     }
 
 
+# Classic ops-lite console is the primary static UI (css/js/vendor under frontend/).
+# React Vite build under frontend/dist and frontend/src remains for optional later work.
 app.mount("/", StaticFiles(directory=str(ROOT / "frontend"), html=True), name="frontend")
+

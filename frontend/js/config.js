@@ -1,5 +1,5 @@
 /** Resolve API + WebSocket URLs for live twin (same-origin, ?backend=, or localStorage). */
-const LS_KEY = "rovertwinBackend";
+const LS_KEY = "sattwinBackend";
 
 function stripSlash(u) {
   return String(u || "").replace(/\/+$/, "");
