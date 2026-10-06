@@ -379,4 +379,25 @@ def get_csv() -> StreamingResponse:
                              headers={"Content-Disposition": "attachment; filename=telemetry.csv"})
 
 
+class CsvIngestBody(BaseModel):
+    csv: str = Field(description="telemetry.csv text (same columns as GET /api/telemetry.csv)")
+
+
+@app.post("/api/telemetry/ingest", summary="Ingest recorded telemetry CSV into the shared-desk twin (local judge evidence)")
+def ingest_csv(body: CsvIngestBody) -> dict:
+    buf = io.StringIO(body.csv)
+    reader = csv.DictReader(buf)
+    rows = list(reader)
+    if not rows:
+        raise HTTPException(400, "empty CSV")
+    result = hub.mission.ingest_csv_rows(rows)
+    return {
+        "ok": True,
+        "ingested": result["ingested"],
+        "sync": result["sync"],
+        "rx": result["rx"],
+        "state": result["snap"].get("sync"),
+    }
+
+
 app.mount("/", StaticFiles(directory=str(ROOT / "frontend"), html=True), name="frontend")

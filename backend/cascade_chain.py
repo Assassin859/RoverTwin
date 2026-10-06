@@ -136,6 +136,11 @@ class CascadeTracker:
                         drop = True
             if drop:
                 st["resolved"] = True
+                txt = st.get("text") or ""
+                if not str(txt).startswith("Resolved:"):
+                    txt = f"Resolved: {txt}"
+                st["text"] = txt
+                st["text_frozen"] = txt
                 newly.append(st)
         self._renumber()
         return newly
@@ -286,15 +291,25 @@ class CascadeTracker:
                 sub = s.get("sub") or ""
                 s["text"] = _root_text(sub, finds)
             elif kind == "edge" and s.get("edges"):
-                s["text"] = _live_edge_text(s["edges"][0], coup)
-                if s.get("resolved") and not s["text"].startswith("Resolved:"):
-                    s["text"] = f"Resolved: {s['text']}"
+                # Freeze resolved chain text so live dB labels cannot rewrite history
+                if s.get("resolved"):
+                    frozen = s.get("text_frozen") or s.get("text") or ""
+                    if not str(frozen).startswith("Resolved:"):
+                        frozen = f"Resolved: {frozen}"
+                    s["text"] = frozen
+                    s["text_frozen"] = frozen
+                else:
+                    s["text"] = _live_edge_text(s["edges"][0], coup)
             elif kind == "sub" and not s.get("resolved"):
                 sub = subs.get(s.get("sub") or "")
                 if sub and sub.get("cause"):
                     s["text"] = f"Loss cascading into {sub['id']}: {sub['cause']}"
-            elif kind == "root" and s.get("resolved") and not str(s.get("text", "")).startswith("Resolved:"):
-                s["text"] = f"Resolved: {s['text']}"
+            elif kind == "root" and s.get("resolved"):
+                frozen = s.get("text_frozen") or s.get("text") or ""
+                if not str(frozen).startswith("Resolved:"):
+                    frozen = f"Resolved: {frozen}"
+                s["text"] = frozen
+                s["text_frozen"] = frozen
             stages.append(s)
         active = [x for x in stages if not x.get("resolved")]
         latest = (active[-1] if active else stages[-1] if stages else None)

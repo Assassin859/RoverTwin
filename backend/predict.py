@@ -149,9 +149,11 @@ def _trend_penalty(ser: dict) -> tuple[float, list[str]]:
 
 
 def score(m: dict, p: Params, horizon: float, ser: dict | None = None, cost: float = 0.0) -> tuple[float, list[str]]:
+    """End-state-aware safety score. Peak pack temp dominates so isolate (~64°C) beats continue (~75°C)."""
     safety, notes = 60.0, []
-    safety -= max(0.0, m["max_t_av"] - 60.0) * 1.2 if m["max_t_av"] <= LIMITS["t_av_max"] else 0.0
-    safety -= max(0.0, m["max_t_bat"] - 42.0) * 1.2 if m["max_t_bat"] <= LIMITS["t_bat_max"] else 0.0
+    # Continuous temp penalty (not only past hard limits) so cooler end-states rank higher
+    safety -= max(0.0, m["max_t_av"] - 55.0) * 1.4
+    safety -= max(0.0, m["max_t_bat"] - 40.0) * 1.8
     if ser:
         pen, tn = _trend_penalty(ser)
         safety -= pen
@@ -163,15 +165,20 @@ def score(m: dict, p: Params, horizon: float, ser: dict | None = None, cost: flo
         safety -= 10 + 25 * clamp((0.18 - m["min_soc"]) / 0.18, 0, 1)
         notes.append(f"battery falls to {m['min_soc']:.0%}")
     if m["max_t_bat"] > LIMITS["t_bat_max"]:
-        safety -= min(30.0, 10 + (m["max_t_bat"] - LIMITS["t_bat_max"]) * 2)
+        safety -= min(35.0, 12 + (m["max_t_bat"] - LIMITS["t_bat_max"]) * 2.5)
         notes.append(f"battery reaches {m['max_t_bat']:.0f}°C")
+    elif m["max_t_bat"] > 55:
+        notes.append(f"battery peaks at {m['max_t_bat']:.0f}°C")
     if m["max_t_av"] > LIMITS["t_av_max"]:
         safety -= min(30.0, 10 + (m["max_t_av"] - LIMITS["t_av_max"]) * 2)
         notes.append(f"avionics reach {m['max_t_av']:.0f}°C")
+    # End-state margin bonus (last sample) — healthier link at horizon wins ties
+    if ser and ser.get("margin"):
+        end_m = float(ser["margin"][-1])
+        safety += clamp(end_m / 20.0, -2.0, 3.0)
     comms = 25.0 * m["link_frac"]
     if m["link_frac"] < 0.25:
         notes.append(f"in contact {m['link_frac']:.0%} of the time (pass windows)")
-    # Mission return: science downlink dominates over legacy "distance"
     sci_den = max(p.science_mb_s * horizon * 0.3, 1e-6)
     ret = 15.0 * clamp(0.2 * m["dist"] / max(p.v_nom * horizon, 1e-6) + 0.8 * m["sci"] / sci_den, 0, 1)
     if m["sci"] > 0:
@@ -182,12 +189,20 @@ def score(m: dict, p: Params, horizon: float, ser: dict | None = None, cost: flo
 
 
 def plan_cost(cmds: list) -> float:
-    """Small penalty for actions that give up redundancy or margin (breaks score ties)."""
+    """Small penalty for actions that give up redundancy (isolate tip cost kept low so cooling wins)."""
     costs = {
-        "bat_isolated": 4.0, "imu": 1.5, "trx": 1.5, "relay_hp": 1.0, "antenna": 0.5,
+        "bat_isolated": 0.8, "imu": 1.5, "trx": 1.5, "relay_hp": 1.0, "antenna": 0.5,
         "pose": 0.35, "payload": 0.25, "mode": 0.4, "drive": 0.2, "speed": 0.15,
     }
     return sum(costs.get(n, 0.05) for n, v in cmds if v not in (False, "A", "HGA", "NORMAL", 1, 1.0))
+
+
+def plan_why(plan: dict, notes: list[str]) -> str:
+    """One-line why for UI: best note, else plan plain."""
+    for n in notes:
+        if n and n != "all limits respected":
+            return n
+    return plan.get("plain") or "all limits respected"
 
 
 def _perturb(h: Health, s: State, unc: dict, rng: random.Random) -> tuple[Health, State]:
@@ -217,6 +232,10 @@ def predict_all(s: State, h: Health, up_ok: bool, unc: dict, p: Params, terrain:
         cols = list(zip(base["series"][k], *[e[k] for e in ens]))
         band[k] = [[min(c), max(c)] for c in cols]
 
+    def _end_margin(ser: dict) -> float:
+        mlist = ser.get("margin") or []
+        return float(mlist[-1]) if mlist else -99.0
+
     # Quiet nominal: only "Do nothing" when twin has no confirmed diagnosis
     if not has_findings:
         cont = next(p for p in PLANS if p["id"] == "continue")
@@ -225,12 +244,14 @@ def predict_all(s: State, h: Health, up_ok: bool, unc: dict, p: Params, terrain:
             "id": cont["id"],
             "name": "No action needed",
             "plain": cont["plain"],
+            "why": "twin is nominal — no recovery needed",
             "cmds": [],
             "score": sc,
             "notes": ["twin is nominal — no recovery needed"],
             "metrics": base["metrics"],
             "events": base["events"][:8],
             "series": base["series"],
+            "end_margin": _end_margin(base["series"]),
             "delivered": None,
             "blocked": False,
             "needs_uplink": False,
@@ -251,9 +272,11 @@ def predict_all(s: State, h: Health, up_ok: bool, unc: dict, p: Params, terrain:
         r = base if plan["id"] == "continue" else simulate(s, h, p, plan["cmds"], up_ok, horizon, terrain=terrain)
         sc, notes = score(r["metrics"], p, horizon, r["series"], plan_cost(plan["cmds"]))
         results.append({
-            "id": plan["id"], "name": plan["name"], "plain": plan["plain"], "cmds": plan["cmds"],
+            "id": plan["id"], "name": plan["name"], "plain": plan["plain"],
+            "why": plan_why(plan, notes), "cmds": plan["cmds"],
             "score": sc, "notes": notes, "metrics": r["metrics"], "events": r["events"][:8],
-            "series": r["series"], "delivered": r["delivered"], "blocked": r["blocked"],
+            "series": r["series"], "end_margin": _end_margin(r["series"]),
+            "delivered": r["delivered"], "blocked": r["blocked"],
             "needs_uplink": any(n not in GROUND_COMMANDS for n, _ in plan["cmds"]),
         })
 
@@ -268,16 +291,20 @@ def predict_all(s: State, h: Health, up_ok: bool, unc: dict, p: Params, terrain:
         r = simulate(s, h, p, cmds, up_ok, horizon, terrain=terrain)
         sc, notes = score(r["metrics"], p, horizon, r["series"], plan_cost(cmds))
         if sc > ranked[0]["score"] + 1:
-            results.append({
+            combo = {
                 "id": "combo:" + ranked[0]["id"] + "+" + ranked[1]["id"],
                 "name": f"{ranked[0]['name']} + {_lc(ranked[1]['name'])}",
                 "plain": ranked[0]["plain"] + " Also: " + _lc(ranked[1]["plain"]),
+                "why": plan_why({"plain": ranked[0]["plain"]}, notes),
                 "cmds": cmds, "score": sc, "notes": notes, "metrics": r["metrics"],
-                "events": r["events"][:8], "series": r["series"], "delivered": r["delivered"],
-                "blocked": r["blocked"], "needs_uplink": True,
-            })
+                "events": r["events"][:8], "series": r["series"],
+                "end_margin": _end_margin(r["series"]),
+                "delivered": r["delivered"], "blocked": r["blocked"], "needs_uplink": True,
+            }
+            results.append(combo)
 
-    results.sort(key=lambda r: (-r["score"], plan_cost(r.get("cmds") or []), r["id"]))
+    # Rank: score, then end-state margin, then tip cost
+    results.sort(key=lambda r: (-r["score"], -(r.get("end_margin") or -99), plan_cost(r.get("cmds") or []), r["id"]))
     crit = [e for e in base["events"] if e["level"] == "crit"]
     return {
         "t0": s.t, "horizon": horizon, "baseline": base["series"], "band": band,

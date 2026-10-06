@@ -107,6 +107,7 @@ class DigitalTwin:
         self.win: deque[dict] = deque(maxlen=150)
         self.long: deque[tuple[float, float, float]] = deque(maxlen=900)
         self.n_est = {"r": 0, "leak": 0, "cap": 0, "rad": 0, "imu": 0, "trx": 0}
+        self._fade_ewma: float | None = None
         self.z = {k: 0.0 for k in RESIDUALS}
         self.alarm = {k: 0 for k in RESIDUALS}
         self.active_anoms: set[str] = set()
@@ -411,7 +412,7 @@ class DigitalTwin:
             add("bat_leak", "EPS", f"internal short in battery string 2, ~{h.bat_leak_w:.0f} W self-heating", h.bat_leak_w, 8, self.n_est["leak"], iso)
         if h.bat_r_mult > 2.0:
             add("bat_r", "EPS", f"battery internal resistance x{h.bat_r_mult:.1f}", h.bat_r_mult - 1, 1.0, self.n_est["r"], iso)
-        if h.bat_capacity_frac < 0.8 and self.n_est["cap"] >= 20:
+        if h.bat_capacity_frac < 0.8 and self.n_est["cap"] >= 10:
             add("bat_cap", "EPS", f"battery capacity fade to {h.bat_capacity_frac:.0%}", 1 - h.bat_capacity_frac, 0.2, self.n_est["cap"] / 4, iso)
         if h.rad_eff < 0.8:
             add("rad", "TCS", f"radiator efficiency down to {h.rad_eff:.0%} (dust / insulation damage)", 1 - h.rad_eff, 0.2, self.n_est["rad"])
@@ -448,10 +449,28 @@ class DigitalTwin:
             ),
             "DATA": 100 - 80 * s.buffer_mb / self.p.buffer_cap_mb,
         }
+        # Knock-on via live couplings so PAYLOAD/ADCS tiles drop in battery demos
+        coup = o.get("couplings") or {}
+        for edge, pen in (("EPS>MOB", 45), ("GNC>MOB", 40), ("TCS>MOB", 35),
+                          ("EPS>GNC", 30), ("TCS>GNC", 25), ("EPS>COMMS", 20)):
+            val = coup.get(edge)
+            strength = float(val[0]) if isinstance(val, (list, tuple)) else float(val or 0)
+            if strength < 0.08:
+                continue
+            tgt = edge.split(">")[-1]
+            if tgt in sc:
+                sc[tgt] = min(sc[tgt], 100 - pen * clamp(strength, 0, 1))
         if c.mode == "SAFE":
             sc["MOB"] = min(sc["MOB"], 50)
         found = self.confirmed_findings()
         roots = {f["sub"] for f in found if not f["contained"]}
+        # Battery / EPS root always knocks PAYLOAD + ADCS tiles below 100 for cascade visibility
+        if "EPS" in roots:
+            sc["MOB"] = min(sc["MOB"], max(35.0, 50 + 0.35 * sc["EPS"]))
+            sc["GNC"] = min(sc["GNC"], max(40.0, 70 + 0.25 * sc["EPS"]))
+        if "TCS" in roots:
+            sc["MOB"] = min(sc["MOB"], 70)
+            sc["GNC"] = min(sc["GNC"], 75)
         contained = {f["sub"]: f["contained"] for f in found if f["contained"]}
         out = []
         for sub, score in sc.items():
@@ -459,8 +478,10 @@ class DigitalTwin:
             cause = ""
             if sub in contained and sub not in roots:
                 cause = f"fault contained: {contained[sub]}"
-            elif sub not in roots and score < 80:
-                cause = knock_on_cause(sub, o["couplings"], roots)
+            elif sub not in roots and score < 100:
+                cause = knock_on_cause(sub, o["couplings"], roots) or (
+                    "knock-on from EPS power bus" if "EPS" in roots and sub in ("MOB", "GNC") else ""
+                )
             status = status_with_hysteresis(score, self._status_prev.get(sub))
             self._status_prev[sub] = status
             out.append({"id": sub, "score": round(score), "status": status,
@@ -469,10 +490,16 @@ class DigitalTwin:
 
     def prognostics(self) -> dict:
         h, s = self.h, self.s
-        fade_per_day = 0.0002 * 2 ** ((s.t_bat - 25.0) / 10.0) * (1 + self.h.bat_leak_w / 20.0)
+        fade_inst = 0.0002 * 2 ** ((s.t_bat - 25.0) / 10.0) * (1 + self.h.bat_leak_w / 20.0)
+        if self._fade_ewma is None:
+            self._fade_ewma = fade_inst
+        else:
+            self._fade_ewma = 0.85 * self._fade_ewma + 0.15 * fade_inst
+        fade_per_day = self._fade_ewma
         raw_cap = 0.5 if s.cfg.bat_isolated else h.bat_capacity_frac
         cap = clamp(raw_cap, 0.0, 1.0)
-        confident = self.n_est.get("cap", 0) >= 20 or s.cfg.bat_isolated
+        # EWMA RUL ready after ≥10 capacity estimator samples
+        confident = self.n_est.get("cap", 0) >= 10 or s.cfg.bat_isolated
         if not confident:
             days = None
         elif fade_per_day < 1e-6:
