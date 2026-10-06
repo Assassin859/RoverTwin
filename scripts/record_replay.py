@@ -27,7 +27,7 @@ MAX_WALL = 170.0  # seconds — leave headroom under 3 min
 def _thin_pred(pred: dict | None) -> dict | None:
     if not pred:
         return None
-    out = {k: pred[k] for k in ("t0", "horizon", "events", "fdir", "first_critical", "recommended") if k in pred}
+    out = {k: pred[k] for k in ("t0", "horizon", "events", "fdir", "first_critical", "recommended", "roots", "delayed_best") if k in pred}
     out["band"] = pred.get("band")
     base = pred.get("baseline") or {}
     series = {}
@@ -120,8 +120,8 @@ def main() -> None:
     saw_crit = False
     saw_ecl = False
     saw_pass = False
-    # Phase 1: cascade until critical forecast + some orbit cues
-    while m.t < 600 + 2800 and wall[0] < MAX_WALL * 0.55:
+    # Phase 1: cascade until critical forecast (do not isolate yet)
+    while m.t < 600 + 5000 and wall[0] < MAX_WALL * 0.5:
         m.advance(2.0)
         n += 1
         _ensure_pred(m, messages, wall, last_pred_seq)
@@ -134,25 +134,39 @@ def main() -> None:
             saw_crit = True
         if n % snap_every != 0 and not (m.events and m.events[-1]["id"] > last_event_id[0]):
             continue
-        _emit_snap(m, messages, wall, last_event_id, 0.18 if m.events and m.events[-1]["id"] == last_event_id[0] else 0.1)
+        _emit_snap(m, messages, wall, last_event_id, 0.15)
         _ensure_pred(m, messages, wall, last_pred_seq)
-        if saw_crit and saw_ecl and n > 200:
+        if saw_crit and n > 150:
             break
 
-    # Force prediction with critical if missing
-    pred = m.compute_prediction(m.prediction_inputs())
-    m.set_prediction(pred)
-    _emit_snap(m, messages, wall, last_event_id, 0.15)
-    emit({"type": "pred", "pred": _thin_pred(pred)}, 0.05)
+    # Force a fresh prediction; if still no critical, run longer in eclipse
+    for _ in range(3):
+        pred = m.compute_prediction(m.prediction_inputs())
+        m.set_prediction(pred)
+        if pred.get("first_critical"):
+            saw_crit = True
+            break
+        m.advance(400)
+    _emit_snap(m, messages, wall, last_event_id, 0.12)
+    emit({"type": "pred", "pred": _thin_pred(m.prediction)}, 0.05)
     last_pred_seq[0] = m.pred_seq
+    if m.prediction and m.prediction.get("first_critical"):
+        saw_crit = True
+        messages.append({
+            "t_wall": round(wall[0], 3),
+            "msg": {"type": "cue", "cue": "critical", "text": m.prediction["first_critical"].get("text")},
+        })
+        wall[0] += 0.02
 
-    # Phase 2: run isolate plan during a pass window (or force uplink when in pass)
-    # Advance until gs_pass or timeout, then run_plan
-    for _ in range(400):
-        if wall[0] > MAX_WALL * 0.72:
+    # Phase 2: wait for a GS pass (sparse every-N orbits), then isolate before/at AOS
+    for _ in range(900):
+        if wall[0] > MAX_WALL * 0.75:
             break
-        m.advance(2.0)
-        if m.plant.s.cfg.mode and m.snapshot().get("twin", {}).get("gs_pass"):
+        m.advance(5.0)
+        if n % 8 == 0:
+            _emit_snap(m, messages, wall, last_event_id, 0.06)
+        if m.snapshot().get("twin", {}).get("gs_pass") or m.plant.o.get("up_ok"):
+            saw_pass = True
             break
     try:
         m.run_plan("isolate")
@@ -161,15 +175,16 @@ def main() -> None:
             m.command("bat_isolated", True)
         except Exception:
             pass
+    _emit_snap(m, messages, wall, last_event_id, 0.1)
 
     # Phase 3: recovery + confirm while compressing wall
-    for _ in range(180):
+    for _ in range(240):
         if wall[0] >= MAX_WALL - 8:
             break
-        m.advance(3.0)
+        m.advance(5.0)
         n += 1
-        if n % 4 == 0:
-            _emit_snap(m, messages, wall, last_event_id, 0.08)
+        if n % 3 == 0:
+            _emit_snap(m, messages, wall, last_event_id, 0.07)
             _ensure_pred(m, messages, wall, last_pred_seq)
 
     # Final recovery snap + pred

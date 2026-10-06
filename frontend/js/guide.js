@@ -130,6 +130,7 @@ export class Guide {
     this.report.classList.add("hidden");
     this.spot([]);
     this.S.preview = null;
+    $("critBanner")?.classList.add("hidden");
   }
 
   reset() {
@@ -213,7 +214,7 @@ export class Guide {
       this.renderCascade();
     } else if (step === "predict") {
       if (!S.replay) this.send("pause", { value: true });
-      this.spot(["cascadePanel", "storyLine"]);
+      this.spot(["cascadePanel", "storyCard"]);
       const p = S.pred, cont = p?.plans?.find((x) => x.id === "continue");
       const fc = p?.first_critical;
       const evs = (p?.events || []).slice(0, 3);
@@ -475,12 +476,16 @@ export class Guide {
       ...[...this.seenEdges].slice(0, 4).map((k) => EDGE_STORY[k]),
       `After the decision: battery charge stayed above ${pct(m.minSoc ?? 0)}, battery peaked at ${(m.maxTb ?? 0).toFixed(0)}°C, avionics at ${(m.maxTa ?? 0).toFixed(0)}°C, link up ${pct(link)} of the time.`,
     ];
+    const nPlans = (S.pred?.plans || []).filter((p) => p.id !== "continue").length;
+    const planWord = nPlans === 1 ? "option" : "options";
+    const w = S.incident?.wattageFrozen;
+    const wattNote = w != null ? ` Peak short ~${Math.max(0, w).toFixed(0)} W.` : "";
     const twin = [
       m.tDetect != null ? `Spotted an anomaly ${dur(m.tDetect - m.tInject)} after the fault began.` : "No residual anomaly was needed: the effect was visible directly.",
       m.diag ? `${esc(m.diag.replace(/ \(confidence.*\)$/, ""))} (found ${dur((m.tDiag || 0) - (m.tInject || 0))} after onset).` : "",
       m.tLost != null ? "Kept predicting the spacecraft while telemetry was lost." : "",
-      m.pred ? esc(m.pred) + "." : "",
-      `Simulated ${S.pred?.plans.length ?? "several"} recovery options; chose "${esc(m.planName || "")}"${m.best ? ", the twin's top recommendation" : ""}.`,
+      m.pred ? esc(String(m.pred).replace(/\bADS\b/g, "AOS")) + "." : "",
+      `Simulated ${nPlans} recovery ${planWord}; chose "${esc(m.planName || "")}"${m.best ? ", the twin's top recommendation" : ""}.${wattNote}`,
     ].filter(Boolean);
     this.report.innerHTML = `<div class="box">
       <h2>Mission report: ${st.icon} ${st.name}</h2>

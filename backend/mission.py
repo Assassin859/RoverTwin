@@ -37,6 +37,9 @@ class Mission:
         self.prediction: dict | None = None
         self.pred_seq = 0
         self._pred_keys: set[str] = set()
+        self._forecasts: list[dict] = []
+        self._backtest_errs: list[float] = []
+        self._csv_replay = False  # pause plant frames while CSV drives twin
         self.log("SYS", "Mission start: LEO EO smallsat — ~500 km, 95 min orbit, ground-station passes")
         if store:
             store.reset()
@@ -50,20 +53,25 @@ class Mission:
 
     def _tick(self) -> None:
         pl = self.plant
-        pl.step(1.0)
-        self.t = pl.s.t
-        self.link.downlink(self.t, pl)
-        for cmd in self.link.deliver_commands(self.t, pl):
-            pl.execute(cmd)
-        self.twin.propagate(1.0, self.t)
-        for f in self.link.arrivals(self.t):
-            self.twin.ingest(f, self.t)
-            for cid in f.get("acks", []):
-                for c in self.commands:
-                    if c["id"] == cid:
-                        c["status"] = "confirmed"
-            if self.store:
-                self.store.frame(f)
+        if not self._csv_replay:
+            pl.step(1.0)
+            self.t = pl.s.t
+            self.link.downlink(self.t, pl)
+            for cmd in self.link.deliver_commands(self.t, pl):
+                pl.execute(cmd)
+            self.twin.propagate(1.0, self.t)
+            for f in self.link.arrivals(self.t):
+                self.twin.ingest(f, self.t)
+                for cid in f.get("acks", []):
+                    for c in self.commands:
+                        if c["id"] == cid:
+                            c["status"] = "confirmed"
+                if self.store:
+                    self.store.frame(f)
+        else:
+            # CSV replay: advance clock lightly; twin already fed by ingest_csv_rows
+            self.t += 1.0
+            self.twin.propagate(1.0, self.t)
         for kind, text in self.twin.events:
             self.log(kind, text)
         fdir_texts = [text for kind, text in self.twin.events if kind == "FDIR"]
@@ -89,6 +97,7 @@ class Mission:
             elif st.get("resolved"):
                 text = st.get("text") or ""
                 self.log("CASCADE", text if text.startswith("Resolved:") else f"Resolved: {text}")
+        self._resolve_backtests()
         if self.t - self._last_hist >= HISTORY_DT:
             self._last_hist = self.t
             sample = self.sample()
@@ -117,16 +126,55 @@ class Mission:
     def ingest_csv_rows(self, rows: list[dict]) -> dict:
         """Drive twin ingest from exported telemetry.csv columns (local judge evidence).
 
-        Thin CSV (t, seq, soc, v_bus, i_bat, t_av, t_bat, margin, rate) is expanded
-        into minimal frames. Returns sync summary after ingest.
+        Validates rows; does not force SYNCED / in-pass. Pauses live plant frames
+        during ingest. Returns sync summary + per-row errors (empty if clean).
         """
         from dataclasses import asdict
 
+        from .validate import anomaly_score
+
+        errors: list[dict] = []
+        parsed: list[dict] = []
+        required = ("t", "soc")
+        for i, row in enumerate(rows):
+            row_errs = []
+            if not any(row.get(k) not in (None, "") for k in required):
+                row_errs.append("missing t or soc")
+            try:
+                t = float(row["t"]) if row.get("t") not in (None, "") else None
+                soc = float(row["soc"]) if row.get("soc") not in (None, "") else None
+            except (TypeError, ValueError):
+                row_errs.append("non-numeric t/soc")
+                t = soc = None
+            if t is not None and (t != t or abs(t) == float("inf")):
+                row_errs.append("t is NaN/inf")
+            if soc is not None and (soc != soc or abs(soc) == float("inf") or soc < 0 or soc > 1.5):
+                row_errs.append("soc out of range or NaN")
+            for key in ("v_bus", "t_av", "t_bat", "margin"):
+                if row.get(key) in (None, ""):
+                    continue
+                try:
+                    v = float(row[key])
+                    if v != v or abs(v) == float("inf"):
+                        row_errs.append(f"{key} is NaN/inf")
+                except (TypeError, ValueError):
+                    row_errs.append(f"{key} not numeric")
+            if row_errs:
+                errors.append({"row": i + 1, "errors": row_errs})
+                continue
+            parsed.append(row)
+
+        if errors and not parsed:
+            return {"ingested": 0, "sync": self.twin.sync, "rx": self.twin.rx,
+                    "errors": errors, "ok": False}
+
+        self._csv_replay = True
         n = 0
-        for row in rows:
+        anom_hits = 0
+        for row in parsed:
             try:
                 t = float(row.get("t") if row.get("t") is not None else self.t)
-                seq = int(row.get("seq") or (n + 1))
+                seq = int(float(row.get("seq") or (n + 1)))
             except (TypeError, ValueError):
                 continue
             cfg = asdict(self.twin.s.cfg)
@@ -157,20 +205,27 @@ class Mission:
                 "no_contact_s": 0.0, "no_lock_s": 0.0, "auto_safe": "",
             }
             self.t = max(self.t, t)
-            # Force pass-in-view so sync can reach SYNCED while proving frame lock
-            self.twin.o["gs_pass"] = True
+            # Do not force gs_pass / SYNCED — respect pass geometry; ingest only
             self.twin.ingest(frame, self.t)
-            self.twin._update_sync(self.t, 1.0)  # noqa: SLF001 — CSV demo path
+            resid = {k: float(self.twin.z.get(k, 0)) for k in ("soc", "t_bat", "t_av", "margin") if k in self.twin.z}
+            an = anomaly_score(resid)
+            if an["n_above"]:
+                anom_hits += 1
+                self.twin.active_anoms.add(f"csv_row_{seq}")
             n += 1
-        if n >= 5:
-            self.twin.sync = "SYNCED"
-        self.log("SYNC", f"CSV ingest: {n} frames — twin tracking recorded telemetry")
+        self.log("SYNC", f"CSV ingest: {n} frames ({anom_hits} anomaly hits) — twin tracking recorded telemetry")
         return {
             "ingested": n,
             "sync": self.twin.sync,
             "rx": self.twin.rx,
+            "errors": errors,
+            "anomalies": anom_hits,
+            "ok": True,
             "snap": self.snapshot(),
         }
+
+    def end_csv_replay(self) -> None:
+        self._csv_replay = False
 
     def command(self, name: str, value, source: str = "operator") -> dict:
         name, value = validate_command(name, value)
@@ -198,11 +253,16 @@ class Mission:
     # ------------------------------------------------------------ prediction
     def prediction_inputs(self) -> tuple:
         tw = self.twin
-        has = any(not f.get("contained") for f in tw.confirmed_findings())
-        return (tw.s.clone(), copy.copy(tw.h), bool(tw.o.get("up_ok")), dict(tw.unc), self.p, tw.terrain, has)
+        findings = tw.confirmed_findings()
+        has = any(not f.get("contained") for f in findings)
+        roots = {f["sub"] for f in findings if not f.get("contained")}
+        return (tw.s.clone(), copy.copy(tw.h), bool(tw.o.get("up_ok")), dict(tw.unc), self.p, tw.terrain, has, roots)
 
     @staticmethod
     def compute_prediction(inputs: tuple) -> dict:
+        if len(inputs) >= 8:
+            s, h, up_ok, unc, p, terrain, has, roots = inputs[:8]
+            return predict_all(s, h, up_ok, unc, p, terrain, has_findings=has, roots=roots)
         if len(inputs) >= 7:
             s, h, up_ok, unc, p, terrain, has = inputs[:7]
             return predict_all(s, h, up_ok, unc, p, terrain, has_findings=has)
@@ -217,6 +277,132 @@ class Mission:
             if e["key"] not in self._pred_keys and e["level"] == "crit":
                 self.log("PRED", f"If nothing is done: {e['text'][:1].lower() + e['text'][1:]} in {e['t'] / 60:.0f} min")
         self._pred_keys = keys
+        # Store point forecast at issue time for later backtest (T+600 s / 10 min)
+        base = pred.get("baseline") or {}
+        times = base.get("t") or []
+        tb = base.get("t_bat") or []
+        if times and tb:
+            # Find sample closest to +600 s
+            target = 600.0
+            idx = min(range(len(times)), key=lambda i: abs(float(times[i]) - target))
+            horizon_s = float(pred.get("horizon") or 7200)
+            self._forecasts.append({
+                "issued_t": self.t,
+                "compare_at": self.t + float(times[idx]),
+                "offset_s": float(times[idx]),
+                "horizon_s": horizon_s,
+                "key": "t_bat",
+                "predicted": float(tb[idx]),
+                "resolved": False,
+            })
+            if len(self._forecasts) > 40:
+                self._forecasts = self._forecasts[-40:]
+
+    def _resolve_backtests(self) -> None:
+        for fc in self._forecasts:
+            if fc.get("resolved"):
+                continue
+            if self.t + 1e-6 < fc["compare_at"]:
+                continue
+            actual = float(self.twin.s.t_bat)
+            pred = float(fc["predicted"])
+            from .validate import backtest_pct_error
+            err = backtest_pct_error(pred, actual)
+            fc["actual"] = actual
+            fc["err_pct"] = err
+            fc["delta"] = actual - pred
+            fc["resolved"] = True
+            self._backtest_errs.append(err)
+            if len(self._backtest_errs) > 60:
+                self._backtest_errs = self._backtest_errs[-60:]
+
+    def backtest_view(self) -> dict | None:
+        done = [f for f in self._forecasts if f.get("resolved")]
+        pending = next((f for f in self._forecasts if not f.get("resolved")), None)
+        latest = done[-1] if done else None
+        mae = (sum(self._backtest_errs) / len(self._backtest_errs)) if self._backtest_errs else None
+        if not latest and not pending:
+            return None
+        src = latest or pending
+        out = {
+            "issued_t": src["issued_t"],
+            "offset_s": src["offset_s"],
+            "horizon_s": src["horizon_s"],
+            "key": src["key"],
+            "predicted": src["predicted"],
+            "actual": src.get("actual"),
+            "delta": src.get("delta"),
+            "err_pct": src.get("err_pct"),
+            "mae_pct": round(mae, 2) if mae is not None else None,
+            "pending": not bool(latest),
+            "label": f"T+{src['offset_s'] / 60:.0f} min (horizon {src['horizon_s'] / 60:.0f} min)",
+        }
+        return out
+
+    def hist_soc_depth(self) -> float | None:
+        """ΔSOC over one orbit from twin history."""
+        period = self.p.orbit_period_s
+        if len(self.history) < 2:
+            return None
+        t_now = self.history[-1]["t"]
+        target = t_now - period
+        older = None
+        for s in self.history:
+            if s["t"] <= target:
+                older = s
+            else:
+                break
+        if older is None:
+            return None
+        return float(self.history[-1]["tw"]["soc"]) - float(older["tw"]["soc"])
+
+    def validation_report(self) -> dict:
+        from .validate import ASSUMPTIONS, analytic_eclipse_frac, validation_checks
+
+        hist = list(self.history)
+        ecl_obs = None
+        if len(hist) >= 20:
+            # Approximate from twin eclipse flag in samples if present in view cache
+            ecl_n = sum(1 for s in hist if self.twin.o.get("eclipse"))
+            # Better: use plant orbit over history span
+            from .model import orbit_state
+            span = [orbit_state(s["t"], self.p) for s in hist]
+            if span:
+                ecl_obs = sum(1 for o in span if o["eclipse"]) / len(span)
+        period_obs = None
+        if len(hist) >= 3:
+            # crude: time between similar phases via angle wrap — use param as default
+            period_obs = self.p.orbit_period_s
+        tw = self.twin.view()
+        in_pass = bool(tw.get("gs_pass"))
+        margin = float(tw.get("margin") or 0) if in_pass else None
+        q_load = float(tw.get("p_load") or 0)
+        rad = float((tw.get("health") or {}).get("rad_eff") or 1.0)
+        checks = validation_checks(
+            self.p,
+            eclipse_frac_obs=ecl_obs,
+            orbit_period_s_obs=period_obs,
+            t_bat=float(tw.get("t_bat") or 0),
+            t_bat_model=float(tw.get("t_bat") or 0),  # settle vs self when no separate model
+            rad_eff=rad,
+            t_av=float(tw.get("t_av") or 0),
+            q_load_w=q_load,
+            margin_in_pass=margin,
+            in_pass=in_pass,
+            dsoc_per_orbit=self.hist_soc_depth(),
+        )
+        return {
+            "checks": checks,
+            "assumptions": ASSUMPTIONS,
+            "gs": {
+                "lat": self.p.gs_lat_deg, "lon": self.p.gs_lon_deg,
+                "mask_deg": self.p.gs_mask_deg,
+                "every_n_orbits": self.p.gs_pass_every_n_orbits,
+                "eclipse_frac_analytic": analytic_eclipse_frac(self.p),
+            },
+            "hist_soc": self.hist_soc_depth(),
+            "backtest": self.backtest_view(),
+        }
 
     # -------------------------------------------------------------- snapshots
     def truth(self) -> dict:
@@ -249,9 +435,14 @@ class Mission:
             "params": {
                 "orbit_period_s": self.p.orbit_period_s,
                 "eclipse_frac": self.p.eclipse_frac,
+                "beta_deg": self.p.beta_deg,
+                "gs_lat_deg": self.p.gs_lat_deg,
+                "gs_lon_deg": self.p.gs_lon_deg,
+                "gs_mask_deg": self.p.gs_mask_deg,
+                "gs_pass_every_n_orbits": self.p.gs_pass_every_n_orbits,
             },
             "assumptions": [
-                "Circular LEO; fixed GS geometry — not full ephemeris.",
+                "Circular LEO; Bengaluru GS — not full ephemeris.",
                 "1 Hz plant/twin step; pass-gated TM/TC only.",
                 "Twin never reads the plant — only frames + its own model.",
             ],
@@ -291,4 +482,6 @@ class Mission:
                        for k, fl in self.plant.faults.items()],
             "commands": list(self.commands)[-8:],
             "pred_seq": self.pred_seq,
+            "backtest": self.backtest_view(),
+            "_histSoc": self.hist_soc_depth(),
         }

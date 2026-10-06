@@ -54,12 +54,13 @@ def test_cascade_resolves_on_containment():
     m.inject("battery", 0.85, 60)
     m.advance(1500)
     assert any(s["kind"] == "root" and not s.get("resolved") for s in m.cascade.stages)
-    for _ in range(20):
+    # Sparse GS — wait for uplink (may be multiple orbits)
+    for _ in range(800):
         if m.twin.o.get("up_ok"):
             break
-        m.advance(60)
+        m.advance(30)
     m.command("bat_isolated", True)
-    m.advance(int(m.p.orbit_period_s * 0.5))
+    m.advance(int(m.p.orbit_period_s * 0.5) + 120)
     roots = [s for s in m.cascade.stages if s["kind"] == "root"]
     assert roots and all(s.get("resolved") for s in roots)
     assert any(s["kind"] == "recovery" for s in m.cascade.stages)
@@ -106,8 +107,11 @@ def test_tracker_one_root_and_resolves():
     a = tr.update(10, findings, corr, coup, subs, view, [])
     assert sum(1 for s in a["new"] if s["kind"] == "root") == 1
     assert tr._stage("root:EPS")["text"].count(";") == 1  # merged texts
-    b = tr.update(20, findings, corr, coup, subs, view, [])
-    assert b["new"] == []
+    # Debounce: edge emits after ≥10 s stable
+    b = tr.update(21, findings, corr, coup, subs, view, [])
+    assert any(s["kind"] == "edge" for s in b["new"])
+    b2 = tr.update(25, findings, corr, coup, subs, view, [])
+    assert b2["new"] == []
     gone = tr.update(30, [], {"active": [], "paths": []}, coup, [], view, [])
     assert gone["resolved"]
     assert tr.stages  # history kept
@@ -121,6 +125,7 @@ def test_snapshot_refreshes_live_edge_text():
     corr = {"active": ["EPS>TCS"], "paths": []}
     coup = {"EPS>TCS": (0.9, "40 W battery heat")}
     tr.update(10, findings, corr, coup, [], view, [])
+    tr.update(21, findings, corr, coup, [], view, [])
     snap = tr.snapshot({"EPS>TCS": (0.95, "59 W battery heat")}, findings, [])
     edge = next(s for s in snap["stages"] if s["kind"] == "edge")
     assert "59 W" in edge["text"]

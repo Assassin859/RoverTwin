@@ -8,14 +8,29 @@ import { loadReplay, playReplay } from "./replay.js";
 import {
   buildValidationChecks, ASSUMPTIONS, actNowVsWait, drawResidualSpark,
   backtestPctError, fmtDb, parseTelemetryCsv, hopWhy,
+  subLabels, cleanText, wattageFromText, fmtW, diagnosisLine, rootsFrom, filterPlansByRoot,
+  fcRemaining, fcLabel, fcPhrase, BacktestTracker, normalizeBacktest, formatBacktest, normalizeValidate,
 } from "./evidence.js";
 
 const $ = (id) => document.getElementById(id);
+/** root = diagnosed subsystem id; status = NONE | ACTIVE | CONTAINED | RESOLVED; planState = QUEUED|UPLINKED|EXECUTED|CONFIRMED. */
+function blankIncident() {
+  return {
+    root: null, roots: [], diagnosis: "", findingId: "", wattageFrozen: null, status: "NONE",
+    recommendedPlan: null, planState: null, firstCriticalT: null,
+    detectedAt: null, resolvedAt: null, resolvedScore: null,
+  };
+}
 export const S = {
   meta: null, snap: null, history: [], events: [], pred: null, truth: false, preview: null,
   connected: false, allPlans: false, pauseOnCritical: true, highlightEdges: null, llmKey: "",
   autoHiDone: false, sessionId: "", replay: false, backtest: null, residHist: [],
+  // Single source of truth for story card / status pill / evidence / report / log
+  incident: blankIncident(),
+  plans: [], planRun: null, markers: [], validate: null,
+  lastMet: -1,
 };
+const backtester = new BacktestTracker();
 export const bus = new EventTarget();
 const emit = (type, detail) => bus.dispatchEvent(new CustomEvent(type, { detail }));
 let lastAnoms = "";
@@ -71,12 +86,13 @@ function showToast(msg, ms = 2800) {
 function showReplayBanner(on, reason) {
   const el = $("replayBanner");
   if (!el) return;
-  el.classList.toggle("hidden", !on);
+  replayBannerOn = !!on;
   const txt = $("replayBannerTxt");
   if (txt) {
     txt.textContent = reason
       || "Recorded mission (offline backup) — inject/plan disabled; loops when the tape ends.";
   }
+  updateBanners(); // single banner slot: PAUSED banner takes priority over this one
 }
 
 async function startReplay() {
@@ -92,6 +108,8 @@ async function startReplay() {
       onLoop() {
         showToast("Replay restarted");
         pausedCritKey = null;
+        replayPaused = false;
+        resetClientState();
         clearCritBanner();
       },
     });
@@ -189,31 +207,66 @@ function applyGroundGate() {
   }
 }
 
+/** Drop everything tied to the previous mission (Reset, new hello, replay loop). */
+function resetClientState() {
+  S.backtest = null;
+  S.residHist = [];
+  backtester.reset();
+  Object.assign(S.incident, blankIncident());
+  S.plans = [];
+  S.planRun = null;
+  S.markers = [];
+  S.lastMet = -1;
+  S.llmKey = "";
+  S.highlightEdges = null;
+  S.autoHiDone = false;
+  S.allPlans = false;
+  S.preview = null;
+  planIds = "";
+  pausedCritKey = null;
+  critPred = null;
+  clearCritBanner();
+}
+
 function onHello(msg) {
+  resetClientState();
   S.sessionId = msg.session_id || "";
   S.meta = msg.meta;
   S.history = msg.history || [];
   S.events = msg.events || [];
   S.pred = msg.pred;
-  S.preview = null;
   S.snap = msg.snap;
+  if (Number.isFinite(msg.snap?.t)) S.lastMet = msg.snap.t;
   buildStatic();
+  if (msg.pred) backtester.addPred(msg.pred);
+  updatePlansView();
+  updateIncident(msg.snap);
   $("log").innerHTML = "";
   $("ticker").innerHTML = "";
   S.events.forEach(addLog);
   render();
   renderPred();
   emit("hello", msg);
+  refreshValidate(true);
 }
 
 function onSnap(snap) {
   if (snap.session_id) S.sessionId = snap.session_id;
+  // MET comes from the latest snap only; late / out-of-order frames are dropped.
+  if (Number.isFinite(snap.t)) {
+    if (S.lastMet >= 0 && snap.t < S.lastMet) return;
+    S.lastMet = snap.t;
+  }
   S.snap = snap;
   const last = S.history[S.history.length - 1];
   if (snap.sample && (!last || snap.sample.t > last.t)) {
     S.history.push(snap.sample);
     if (S.history.length > 1500) S.history.shift();
   }
+  updateBacktest(snap);
+  updatePlansView();
+  updatePlanRun(snap);
+  updateIncident(snap); // before addLog so every log line sees the same frozen wattage
   for (const e of snap.events || []) {
     S.events.push(e);
     addLog(e);
@@ -228,59 +281,218 @@ function onSnap(snap) {
   emit("snap", snap);
 }
 
-function onPred(pred) {
-  S.pred = pred;
-  // Prediction backtest: compare earlier baseline point to current telemetry
-  if (pred?.baseline?.t_bat && S.snap?.twin) {
-    const arr = pred.baseline.t_bat;
-    if (arr.length > 5) {
-      const idx = Math.min(arr.length - 1, 20); // ~T+10 min at 30 s steps thinned
-      const predicted = arr[idx];
-      const actual = S.snap.twin.t_bat;
-      const err = backtestPctError(predicted, actual);
-      S.backtest = { predicted, actual, err, at: `T+${idx * 0.5 | 0}` };
+// ------------------------------------------------------------- incident (single source of truth)
+/** Plans for the diagnosed root only, ordered by root relevance then score. */
+function updatePlansView() {
+  const p = S.pred;
+  if (!p) { S.plans = []; return; }
+  const finds = S.snap?.findings || [];
+  const liveActive = finds.some((f) => !f.contained);
+  let plans;
+  if (!liveActive && (p.roots || []).length) {
+    // Prediction is stale (fault already contained / resolved): only "do nothing" is honest.
+    plans = (p.plans || []).filter((x) => x.id === "continue");
+  } else {
+    plans = filterPlansByRoot(p.plans || [], rootsFrom(p, finds));
+  }
+  S.plans = plans;
+  const top = plans.find((x) => x.id !== "continue" && x.name !== "No action needed");
+  S.incident.recommendedPlan = top ? { id: top.id, name: top.name, score: top.score } : null;
+}
+
+function updateIncident(sn) {
+  if (!sn) return;
+  const inc = S.incident;
+  const finds = sn.findings || [];
+  const active = finds.filter((f) => !f.contained);
+  const scoreOf = (id) => (sn.subsystems || []).find((s) => s.id === id)?.score;
+  const byConf = (a, b) => (b.conf ?? 0) - (a.conf ?? 0);
+
+  if (active.length) {
+    if (!inc.root || inc.status === "RESOLVED") {
+      const rec = inc.recommendedPlan;
+      Object.assign(inc, blankIncident()); // same object identity for guide.js
+      inc.recommendedPlan = rec;
+      if (S.planRun?.shown === "CONFIRMED") S.planRun = null;
+      inc.detectedAt = sn.t;
+    }
+    const subs = [...new Set(active.map((f) => f.sub))];
+    const root = (S.pred?.roots || []).find((r) => subs.includes(r)) || [...active].sort(byConf)[0].sub;
+    const prim = active.filter((f) => f.sub === root).sort(byConf)[0];
+    inc.root = root;
+    inc.roots = subs;
+    inc.findingId = prim.id;
+    inc.status = "ACTIVE";
+    if (inc.wattageFrozen == null) {
+      const leak = finds.find((f) => f.id === "bat_leak" && !f.contained) || finds.find((f) => f.id === "bat_leak");
+      const w = wattageFromText(leak?.text);
+      if (w != null) inc.wattageFrozen = w;
+    }
+    inc.diagnosis = cleanText(diagnosisLine(prim), inc.wattageFrozen);
+  } else if (inc.root && inc.status !== "RESOLVED") {
+    const contained = finds.some((f) => f.contained && inc.roots.includes(f.sub));
+    if (S.planRun?.shown === "CONFIRMED") {
+      inc.status = "RESOLVED";
+      inc.resolvedAt = sn.t;
+      inc.resolvedScore = scoreOf(inc.root);
+    } else if (contained) {
+      inc.status = "CONTAINED";
+    } else {
+      const rec = inc.recommendedPlan;
+      Object.assign(inc, blankIncident()); // fault cleared by the harness: back to watching
+      inc.recommendedPlan = rec;
     }
   }
+  inc.planState = S.planRun ? S.planRun.shown : null;
+  inc.firstCriticalT = fcRemaining(S.pred, sn.t);
+}
+
+// ------------------------------------------------------------- backtest (predicted vs actual)
+function updateBacktest(sn) {
+  const fromBackend = normalizeBacktest(sn.backtest);
+  if (fromBackend) { S.backtest = fromBackend; return; }
+  const smp = S.history[S.history.length - 1];
+  const actual = smp?.tm && sn.t - smp.t < 60 ? smp.tm.t_bat : sn.twin?.t_bat;
+  S.backtest = backtester.update(sn.t, actual);
+}
+
+function onPred(pred) {
+  S.pred = pred;
+  backtester.addPred(pred);
+  updatePlansView();
+  if (S.snap) updateIncident(S.snap);
   renderPred();
   emit("pred", pred);
   const fc = pred?.first_critical;
   if (S.pauseOnCritical && fc && pausedCritKey !== fc.key) {
     pausedCritKey = fc.key;
+    critPred = pred;
     if (S.replay && replayHandle) {
       replayHandle.pause();
       replayPaused = true;
-      const btn = $("replayPauseBtn");
-      if (btn) btn.textContent = "Resume";
     } else {
       send("pause", { value: true });
     }
-    showCritBanner(fc);
+    showCritBanner();
   }
 }
 
-function showCritBanner(fc) {
-  const el = $("critBanner");
-  if (!el) return;
-  const when = fc.t < 90 ? `${Math.round(fc.t)} s` : fc.t < 5400 ? `${Math.round(fc.t / 60)} min` : `${(fc.t / 3600).toFixed(1)} h`;
-  el.querySelector(".crit-msg").textContent = `PAUSED — critical forecast: ${fc.text} in ${when}`;
-  el.classList.remove("hidden");
+// ------------------------------------------------------------- PAUSED banner (one slot, one Resume)
+let critBannerOn = false;
+let pendingPause = false;
+let replayBannerOn = false;
+let critPred = null;
+
+const isPaused = () => (S.replay ? !!(replayHandle && replayHandle.paused) : !!S.snap?.paused);
+
+function critText() {
+  const pr = S.pred?.first_critical ? S.pred : critPred;
+  const fc = pr?.first_critical;
+  if (!fc) return "PAUSED \u2014 critical forecast";
+  // Same minutes value as the forecast head and the coach (shared helper).
+  return `PAUSED \u2014 critical forecast: ${fcPhrase(fc, fcRemaining(pr, S.snap?.t))}`;
+}
+
+function updateBanners() {
+  const crit = $("critBanner"), rep = $("replayBanner");
+  const paused = isPaused();
+  // Any resume path (Resume, speed change, Reset, report close, Explore MC) lands here.
+  if (critBannerOn && !paused && !pendingPause) critBannerOn = false;
+  const showCrit = critBannerOn;
+  if (crit) {
+    crit.classList.toggle("hidden", !showCrit);
+    const msg = crit.querySelector(".crit-msg");
+    if (showCrit && msg) msg.textContent = critText();
+  }
+  if (rep) rep.classList.toggle("hidden", !replayBannerOn || showCrit);
+  const rb = $("replayPauseBtn");
+  if (rb) rb.textContent = paused ? "Resume" : "Pause";
+}
+
+function showCritBanner() {
+  critBannerOn = true;
+  pendingPause = true;
+  clearTimeout(showCritBanner._t);
+  showCritBanner._t = setTimeout(() => { pendingPause = false; updateBanners(); }, 2500);
+  updateBanners();
 }
 
 function clearCritBanner() {
-  $("critBanner")?.classList.add("hidden");
+  critBannerOn = false;
+  pendingPause = false;
+  updateBanners();
 }
 
-function resumeFromCritical() {
+/** Resume the sim (live or recorded) and drop the PAUSED banner. */
+function resumeSim() {
   clearCritBanner();
-  // Keep pausedCritKey so the same first_critical does not immediately re-pause.
   if (S.replay && replayHandle) {
     replayHandle.resume();
     replayPaused = false;
-    const btn = $("replayPauseBtn");
-    if (btn) btn.textContent = "Pause";
   } else {
     send("pause", { value: false });
   }
+  updateBanners();
+}
+
+// ------------------------------------------------------------- Execute: toast + chip + chart marker
+const PLAN_STEPS = ["QUEUED", "UPLINKED", "EXECUTED", "CONFIRMED"];
+
+function executePlan(id) {
+  const sn = S.snap;
+  const pl = (S.pred?.plans || []).find((x) => x.id === id);
+  if (!sn || !pl || !S.connected || S.replay) return;
+  const cmdBase = Math.max(0, ...(sn.commands || []).map((c) => c.id));
+  send("plan", { id });
+  S.preview = null;
+  S.planRun = {
+    id, name: pl.name, tExec: sn.t, cmdBase, ncmds: (pl.cmds || []).length || 1,
+    shown: "QUEUED", target: "QUEUED", shownAt: performance.now(),
+  };
+  S.markers.push({ t: sn.t, label: "EXEC" });
+  S.incident.planState = "QUEUED";
+  const wasPaused = isPaused();
+  if (wasPaused) {
+    // A paused sim cannot uplink: resume so the plan can progress (banner clears with it).
+    clearCritBanner();
+    send("pause", { value: false });
+  }
+  showToast(`Plan sent: ${pl.name} \u00b7 QUEUED${wasPaused ? " \u00b7 sim resumed so the uplink can run" : ""}`, 4200);
+  renderPlanRun();
+  renderPred();
+  drawCharts();
+}
+
+function updatePlanRun(sn) {
+  const pr = S.planRun;
+  if (!pr || !sn) return;
+  const cmds = (sn.commands || []).filter((c) => c.id > pr.cmdBase && c.source === "plan");
+  const st = (c) => String(c.status || "");
+  const delivered = (c) => /^(delivered|ground|confirmed)$/.test(st(c));
+  const got = cmds.length >= pr.ncmds;
+  let target = "QUEUED";
+  if (cmds.some(delivered)) target = "UPLINKED";
+  if (got && cmds.every(delivered)) target = "EXECUTED";
+  if (got && cmds.every((c) => st(c) === "confirmed")) target = "CONFIRMED";
+  pr.target = target;
+  // Reveal one stage at a time (>= 700 ms) so all four chips are visible, even while paused.
+  const i = PLAN_STEPS.indexOf(pr.shown), j = PLAN_STEPS.indexOf(target);
+  if (j > i && performance.now() - pr.shownAt >= 700) {
+    pr.shown = PLAN_STEPS[i + 1];
+    pr.shownAt = performance.now();
+    if (pr.shown === "CONFIRMED") showToast(`Plan CONFIRMED: ${pr.name}`, 3200);
+  }
+}
+
+function renderPlanRun() {
+  const box = $("planRun");
+  if (!box) return;
+  const pr = S.planRun;
+  if (!pr) { box.classList.add("hidden"); patch(box, ""); return; }
+  box.classList.remove("hidden");
+  const i = PLAN_STEPS.indexOf(pr.shown);
+  patch(box, `<div class="pr-name">${esc(pr.name)}</div><div class="pr-steps">${PLAN_STEPS.map((s, k) =>
+    `<span class="pr-step st-${s}${k <= i ? " on" : ""}${k === i ? " cur" : ""}">${s}</span>`).join("")}</div>`);
 }
 
 // ------------------------------------------------------------- 3D + charts
@@ -315,8 +527,7 @@ function buildStatic() {
     if (b && S.connected) send("inject", { kind: b.dataset.kind, severity: +$("sev").value, ramp: +$("ramp").value });
   });
   $("morePlans").addEventListener("click", () => {
-    S.allPlans = !S.allPlans;
-    if (S.allPlans) openDrawer("residPanel");
+    S.allPlans = !S.allPlans; // never touches the MORE drawer
     renderPred();
   });
   document.querySelector("#morePanel .tabbar").addEventListener("click", (e) => {
@@ -324,9 +535,20 @@ function buildStatic() {
     if (b) showTab(b.dataset.tab);
   });
   $("drawerToggle")?.addEventListener("click", () => {
-    const d = $("morePanel");
-    if (d.classList.contains("collapsed")) openDrawer();
+    if ($("morePanel").classList.contains("collapsed")) openDrawer();
     else closeDrawer();
+  });
+  // MORE drawer: restore last tab + open state (stays open until the user closes it)
+  {
+    const m = loadMore();
+    if (m.tab) showTab(m.tab, false);
+    if (m.open) openDrawer(m.tab);
+  }
+  $("viewToggle")?.addEventListener("click", () => {
+    const dock = $("viewDock");
+    if (!dock) return;
+    const hide = dock.classList.toggle("collapsed");
+    $("viewToggle").textContent = hide ? "Show" : "Hide";
   });
   $("moreMenuBtn")?.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -340,8 +562,17 @@ function buildStatic() {
       $("moreMenuBtn")?.setAttribute("aria-expanded", "false");
     }
   });
-  $("playPauseBtn")?.addEventListener("click", () => send("pause", { value: !S.snap?.paused }));
+  $("playPauseBtn")?.addEventListener("click", () => {
+    if (S.replay && replayHandle) {
+      if (replayHandle.paused) resumeSim();
+      else { replayHandle.pause(); replayPaused = true; updateBanners(); }
+      return;
+    }
+    if (S.snap?.paused) resumeSim();
+    else send("pause", { value: true });
+  });
   $("speedSelect")?.addEventListener("change", (e) => {
+    clearCritBanner(); // speed change = resume
     send("pause", { value: false });
     send("speed", { value: +e.target.value });
   });
@@ -363,9 +594,8 @@ function buildStatic() {
     if (!b) return;
     const id = b.closest(".plan").dataset.id;
     if (b.dataset.act === "run") {
-      if (!S.connected) return;
-      send("plan", { id });
-      S.preview = null;
+      executePlan(id);
+      return;
     } else S.preview = S.preview === id ? null : id;
     renderPred();
     drawCharts();
@@ -399,22 +629,34 @@ function tileTag(s) {
   return `<div class="tagline knock">hit by ${SUB_NAME[src] || src}</div>`;
 }
 
-export function showTab(id) {
+const MORE_KEY = "sattwin_more";
+function loadMore() {
+  try { return JSON.parse(localStorage.getItem(MORE_KEY) || "{}") || {}; } catch (_) { return {}; }
+}
+function saveMore(patchObj) {
+  try { localStorage.setItem(MORE_KEY, JSON.stringify({ ...loadMore(), ...patchObj })); } catch (_) { /* private mode */ }
+}
+
+export function showTab(id, remember = true) {
   for (const b of document.querySelectorAll("#morePanel [data-tab]")) b.classList.toggle("on", b.dataset.tab === id);
   for (const p of document.querySelectorAll("#morePanel .tab-pane")) p.classList.toggle("on", p.id === id);
+  if (remember) saveMore({ tab: id });
+  if (id === "residPanel") refreshValidate();
+  requestAnimationFrame(drawCharts);
 }
 
 function openDrawer(tab) {
   const d = $("morePanel");
   d.classList.remove("collapsed");
   $("drawerToggle")?.setAttribute("aria-expanded", "true");
-  if (tab) showTab(tab);
-  requestAnimationFrame(drawCharts);
+  showTab(tab || loadMore().tab || "chartsPanel");
+  saveMore({ open: true });
 }
 
 function closeDrawer() {
   $("morePanel").classList.add("collapsed");
   $("drawerToggle")?.setAttribute("aria-expanded", "false");
+  saveMore({ open: false });
 }
 
 function render() {
@@ -452,9 +694,20 @@ function render() {
   $("modeTxt").textContent = mode;
   const syncShort = $("syncTxt").textContent || "INIT";
   const merged = $("statusMerged");
-  if (merged) merged.textContent = `${mode} · ${syncShort}`;
+  let mergedTxt = `${mode} · ${syncShort}`;
+  if (S.incident.status === "RESOLVED") {
+    mergedTxt = `RESOLVED · ${syncShort}`;
+  } else if (S.incident.status === "DEGRADED" && tw.cfg.bat_isolated) {
+    mergedTxt = `DEGRADED · one string isolated`;
+  } else if (S.incident.status === "DEGRADED" && tw.cfg.imu === "B") {
+    mergedTxt = `DEGRADED · IMU-B`;
+  } else if ((sn.subsystems || []).some((s) => s.score < 80) && mode === "NOMINAL") {
+    mergedTxt = `DEGRADED · ${syncShort}`;
+    mode = "DEGRADED";
+  }
+  if (merged) merged.textContent = mergedTxt;
   const statusPill = $("statusPill");
-  if (statusPill) statusPill.className = "pill " + pillCls;
+  if (statusPill) statusPill.className = "pill " + (S.incident.status === "RESOLVED" ? "ok" : mode === "DEGRADED" || S.incident.status === "DEGRADED" ? "warn" : pillCls);
   $("syncPill").className = "pill sr-only " + syncCls;
   $("modePill").className = "pill sr-only " + (modeBad ? "bad" : modeWarn ? "warn" : "ok");
 
@@ -491,17 +744,41 @@ function render() {
       <div class="sub-st">${ST_ICON[st] || "●"} ${st}</div></div>`;
   }).join(""));
 
-  // story line under cascade
-  const story = $("storyLine");
-  if (story) {
-    const find = (sn.findings || []).find((f) => !f.contained) || (sn.findings || [])[0];
-    const fc = S.pred?.first_critical;
-    const rec = S.pred?.plans?.[0];
-    const diag = find ? find.text : "All systems nominal";
-    const next = fc ? `${fc.text} in ${fmtDur(fc.t)}` : (orb.gs_pass || tw.gs_pass ? "ground pass active" : `next pass in ${Math.round((orb.next_pass_s || tw.next_pass_s || 0) / 60)} min`);
-    const recTxt = rec ? rec.name : "—";
-    story.textContent = `Diagnosis: ${diag} · Next: ${next} · Fix: ${recTxt}`;
+  // 3-line story card under cascade
+  const scores = (sn.subsystems || []).map((s) => s.score);
+  const minScore = scores.length ? Math.min(...scores) : 100;
+  const find = (sn.findings || []).find((f) => !f.contained) || (sn.findings || [])[0];
+  const fc = S.pred?.first_critical;
+  const rec = (S.pred?.plans || []).find((p) => p.id !== "continue" && p.name !== "No action needed") || S.pred?.plans?.[0];
+  let diag = "—";
+  if (S.incident.status === "RESOLVED") {
+    const w = S.incident.wattageFrozen;
+    const eps = (sn.subsystems || []).find((s) => s.id === "EPS");
+    diag = `Resolved: ${S.incident.diagnosis || "fault contained"} at MET ${fmtMET(sn.t)}${eps ? ` · EPS ${eps.score}` : ""}${w != null ? ` · ${Math.max(0, w).toFixed(0)} W` : ""}`;
+  } else if (find) {
+    diag = find.text;
+  } else if (minScore < 80) {
+    const weak = (sn.subsystems || []).find((s) => s.score === minScore);
+    diag = `${SUB_NAME[weak?.id] || "System"} degraded (${minScore})`;
+  } else if ((sn.subsystems || []).some((s) => s.id === "COMMS" && s.status === "WATCH")) {
+    diag = "Watching COMMS: no action needed yet";
+  } else {
+    diag = "All systems nominal";
   }
+  const tFc = S.incident.firstCriticalT != null ? S.incident.firstCriticalT : fc?.t;
+  const next = fc
+    ? `${fc.text} in ${fmtDur(tFc ?? fc.t)}`
+    : (orb.gs_pass || tw.gs_pass ? "ground pass active" : `next pass in ${Math.round((orb.next_pass_s || tw.next_pass_s || 0) / 60)} min`);
+  let recTxt = "—";
+  if (S.incident.status === "RESOLVED") recTxt = "Contained — monitoring";
+  else if (rec && rec.id !== "continue" && rec.name !== "No action needed") recTxt = rec.name;
+  else if (find) recTxt = "Evaluating options…";
+  else if ((sn.subsystems || []).some((s) => s.id === "COMMS" && s.status === "WATCH")) recTxt = "Watching — no uplink yet";
+  else recTxt = "No action needed";
+  const elDiag = $("storyDiag"), elNext = $("storyNext"), elRec = $("storyRec");
+  if (elDiag) elDiag.textContent = diag;
+  if (elNext) elNext.textContent = next;
+  if (elRec) elRec.textContent = recTxt;
 
   // diagnosis
   const pr = sn.prognostics;
@@ -641,14 +918,42 @@ function renderChain(chain) {
   patch(box, `<div class="ch-h">CHAIN REACTION <small>${stages.length} stage${stages.length === 1 ? "" : "s"}</small></div><ol>${rows}</ol>`);
 }
 
+let _validateAt = 0;
+async function fetchValidate() {
+  if (S.replay || Date.now() - _validateAt < 4000) return;
+  _validateAt = Date.now();
+  try {
+    const q = S.sessionId ? `?session_id=${encodeURIComponent(S.sessionId)}` : "";
+    const r = await fetch(apiUrl(`/api/validate${q}`));
+    if (!r.ok) return;
+    const j = await r.json();
+    S._validate = j;
+    const box = $("validateStrip");
+    if (!box || !j.checks) return;
+    const assum = (j.assumptions || ASSUMPTIONS).slice(0, 3);
+    patch(box, `<div class="ch-h" style="margin-bottom:4px">MODEL CHECK</div>`
+      + j.checks.map((c) => `<div class="vc ${c.ok ? "ok" : "bad"}"><b>${esc(c.name)}</b><span>${esc(c.observed)}</span><span style="grid-column:1/-1">${esc(c.reference)}</span></div>`).join("")
+      + `<div class="note" style="margin-top:6px"><b>Assumptions / limits:</b> ${assum.map(esc).join(" · ")}</div>`);
+  } catch (_) { /* offline / replay */ }
+}
+
 function renderValidate(sn) {
   const box = $("validateStrip");
   if (!box) return;
-  const checks = buildValidationChecks(sn, S.meta);
-  const assum = (S.meta?.assumptions || ASSUMPTIONS).slice(0, 3);
-  patch(box, `<div class="ch-h" style="margin-bottom:4px">MODEL CHECK</div>`
-    + checks.map((c) => `<div class="vc ${c.ok ? "ok" : "bad"}"><b>${esc(c.name)}</b><span>${esc(c.observed)}</span><span style="grid-column:1/-1">${esc(c.reference)}</span></div>`).join("")
-    + `<div class="note" style="margin-top:6px"><b>Assumptions / limits:</b> ${assum.map(esc).join(" · ")}</div>`);
+  if (S._validate?.checks) {
+    const j = S._validate;
+    const assum = (j.assumptions || ASSUMPTIONS).slice(0, 3);
+    patch(box, `<div class="ch-h" style="margin-bottom:4px">MODEL CHECK</div>`
+      + j.checks.map((c) => `<div class="vc ${c.ok ? "ok" : "bad"}"><b>${esc(c.name)}</b><span>${esc(c.observed)}</span><span style="grid-column:1/-1">${esc(c.reference)}</span></div>`).join("")
+      + `<div class="note" style="margin-top:6px"><b>Assumptions / limits:</b> ${assum.map(esc).join(" · ")}</div>`);
+  } else {
+    const checks = buildValidationChecks(sn, S.meta);
+    const assum = (S.meta?.assumptions || ASSUMPTIONS).slice(0, 3);
+    patch(box, `<div class="ch-h" style="margin-bottom:4px">MODEL CHECK</div>`
+      + checks.map((c) => `<div class="vc ${c.ok ? "ok" : "bad"}"><b>${esc(c.name)}</b><span>${esc(c.observed)}</span><span style="grid-column:1/-1">${esc(c.reference)}</span></div>`).join("")
+      + `<div class="note" style="margin-top:6px"><b>Assumptions / limits:</b> ${assum.map(esc).join(" · ")}</div>`);
+  }
+  fetchValidate();
 }
 
 function renderCorrTable(corr, hi) {
@@ -790,10 +1095,39 @@ async function refreshLlmStatus() {
 function drawCharts() {
   if (!S.snap) return;
   const plan = S.preview && S.pred ? S.pred.plans.find((p) => p.id === S.preview)?.series : null;
-  for (const c of charts) c.draw({ history: S.history, now: S.snap.t, pred: S.pred, plan, truthOn: S.truth });
+  for (const c of charts) c.draw({ history: S.history, now: S.snap.t, pred: S.pred, plan, truthOn: S.truth, markerT: S.execMarkerT });
 }
 
 let planIds = "";
+function filterPlansForRoot(plans, roots, findings) {
+  const rset = new Set(roots || []);
+  if (!rset.size && findings?.length) {
+    for (const f of findings) if (!f.contained) rset.add(f.sub);
+  }
+  if (!rset.size) return plans;
+  const RADIO = new Set(["trx_b", "lga", "resume"]);
+  const BAT = new Set(["isolate"]);
+  const SENSOR = new Set(["imu_b"]);
+  let list = plans.filter((pl) => {
+    if (pl.id === "continue") return true;
+    if (rset.size === 1 && rset.has("COMMS") && BAT.has(pl.id)) return false;
+    if (rset.size === 1 && rset.has("GNC") && (BAT.has(pl.id) || pl.id === "trx_b" || pl.id === "lga")) return false;
+    if (rset.has("COMMS") && !rset.has("EPS") && BAT.has(pl.id)) return false;
+    return true;
+  });
+  list = [...list].sort((a, b) => {
+    const rel = (pl) => {
+      if (rset.has("GNC") && SENSOR.has(pl.id)) return 3;
+      if (rset.has("EPS") && BAT.has(pl.id)) return 3;
+      if (rset.has("COMMS") && RADIO.has(pl.id)) return 3;
+      if (pl.relevance != null) return pl.relevance > 0 ? 2 : 0;
+      return 1;
+    };
+    return rel(b) - rel(a) || (b.score - a.score);
+  });
+  return list;
+}
+
 function renderPred() {
   const p = S.pred;
   if (!p || !S.snap) { patch($("impact"), `<div class="impact-sub">Waiting for the first prediction…</div>`); return; }
@@ -815,22 +1149,30 @@ function renderPred() {
       });
       if (tMin != null) bandNote = ` (ensemble ${fmtDur(tMin)}–${fmtDur(tMax)})`;
     }
-    head = `${esc(fc.text)} in ${fmtDur(fc.t)}${bandNote}`;
-  } else if (activeFind) {
+    const tShow = S.incident.firstCriticalT != null ? S.incident.firstCriticalT : fc.t;
+    head = `${esc(fc.text)} in ${fmtDur(tShow)}${bandNote}`;
+  } else if (activeFind || (p.events || []).length) {
     head = "Forecast still risky — diagnosis active";
   } else {
     head = "All clear for the next 2 hours";
   }
   const evs = [...p.events.map((e) => ({ ...e })), ...p.fdir].sort((a, b) => a.t - b.t);
+  // Never claim all-clear while listing events
+  if (!fc && !activeFind && evs.length) head = "Watching forecast events";
   patch($("impact"), `
-    <div class="impact-head ${fc || activeFind ? "bad" : "ok"}">${head}</div>
+    <div class="impact-head ${fc || activeFind || evs.length ? "bad" : "ok"}">${head}</div>
     ${evs.length ? evs.slice(0, 4).map((e) => `<div class="ev ${e.level}"><span>in ${fmtDur(e.t)}</span><span>${e.level === "info" ? "FDIR: " : ""}${esc(e.text)}</span></div>`).join("") : `<div class="note">The twin expects the spacecraft to stay healthy through the next orbits.</div>`}`);
 
   const bt = $("backtestLine");
   if (bt) {
-    if (S.backtest) {
-      const b = S.backtest;
-      bt.textContent = `Backtest: predicted ${b.predicted.toFixed(1)} °C at ${b.at}, actual ${b.actual.toFixed(1)} °C, error ${b.err.toFixed(1)}%`;
+    const b = S.backtest || S.snap?.backtest;
+    if (b && b.predicted != null) {
+      const lab = b.label || (b.offset_s != null ? `T+${(b.offset_s / 60).toFixed(0)} min` : "");
+      const act = b.actual != null ? b.actual.toFixed(1) : "…";
+      const err = b.err_pct != null ? b.err_pct.toFixed(1) : (b.err != null ? b.err.toFixed(1) : "—");
+      const mae = b.mae_pct != null ? ` · MAE ${b.mae_pct.toFixed(1)}%` : "";
+      const dlt = b.delta != null ? ` · Δ ${b.delta >= 0 ? "+" : ""}${b.delta.toFixed(1)} °C` : "";
+      bt.textContent = `Backtest ${lab}: predicted ${(+b.predicted).toFixed(1)} °C, actual ${act} °C, error ${err}%${dlt}${mae}`;
     } else bt.textContent = "";
   }
 
@@ -848,17 +1190,18 @@ function renderPred() {
   }
 
   const tw = S.snap.twin;
-  const ids = p.plans.map((x) => x.id).join(",");
+  const plans = filterPlansForRoot(p.plans, p.roots, S.snap.findings);
+  const ids = plans.map((x) => x.id).join(",");
   const box = $("plans");
   if (ids !== planIds) {
     planIds = ids;
-    box.innerHTML = p.plans.map((pl) => `<div class="plan" data-id="${esc(pl.id)}">
-      <div class="plan-h"><span class="rk badge hidden">BEST</span><b>${esc(pl.name)}</b><span class="sc"></span></div>
+    box.innerHTML = plans.map((pl) => `<div class="plan" data-id="${esc(pl.id)}">
+      <div class="plan-h"><span class="rk badge hidden">BEST</span><b>${esc(pl.name)}</b><span class="sc"></span><span class="plan-chip hidden"></span></div>
       <div class="scorebar"><i></i></div><div class="notes"></div>
       <div class="acts"><button class="pbtn" data-act="preview">Preview</button><button class="pbtn go" data-act="run">${S.replay ? "Recorded" : "Execute"}</button><span class="up badge warn hidden">queued until next pass</span></div></div>`).join("");
   }
-  const shown = S.allPlans ? p.plans.length : 3;
-  p.plans.forEach((pl, i) => {
+  const shown = S.allPlans ? plans.length : 3;
+  plans.forEach((pl, i) => {
     const el = box.querySelector(`[data-id="${CSS.escape(pl.id)}"]`);
     if (!el) return;
     const m = pl.metrics;
@@ -870,6 +1213,12 @@ function renderPred() {
     el.querySelector(".rk").classList.toggle("hidden", !(i === 0 && pl.id !== "continue"));
     el.querySelector(".sc").textContent = pl.score.toFixed(0);
     el.querySelector(".scorebar i").style.width = `${Math.max(0, Math.min(100, pl.score))}%`;
+    const chip = el.querySelector(".plan-chip");
+    if (chip) {
+      const show = S.planChip && S.planChip.id === pl.id;
+      chip.classList.toggle("hidden", !show);
+      if (show) chip.textContent = S.planChip.state;
+    }
     const why = pl.why || pl.notes?.[0] || "";
     patch(el.querySelector(".notes"), [
       why ? `<span class="${why === "all limits respected" || why.includes("nominal") ? "good" : ""}">${esc(why)}</span>` : "",
@@ -885,8 +1234,8 @@ function renderPred() {
     el.querySelector(".up").classList.toggle("hidden", !(pl.needs_uplink && !tw.up_ok));
   });
   const more = $("morePlans");
-  more.classList.toggle("hidden", p.plans.length <= 3);
-  more.textContent = S.allPlans ? "Show fewer" : `Show all ${p.plans.length} options`;
+  more.classList.toggle("hidden", plans.length <= 3);
+  more.textContent = S.allPlans ? "Show fewer" : `Show all ${plans.length} options`;
 }
 
 
@@ -927,21 +1276,27 @@ $("goConsole").onclick = showConsole;
 $("goGuide").onclick = () => { showConsole(); guide.start(); };
 $("home").onclick = showLanding;
 $("guideBtn").onclick = () => guide.start();
-$("resetBtn").onclick = () => { pausedCritKey = null; clearCritBanner(); S.llmKey = ""; S.highlightEdges = null; S.autoHiDone = false; send("reset"); };
+$("resetBtn").onclick = () => {
+  resetClientState(); // clears S.backtest, S.residHist, incident, markers, PAUSED banner
+  send("pause", { value: false });
+  send("reset");
+};
 $("truth").onchange = (e) => { S.truth = e.target.checked; render(); };
 $("pauseCrit").onchange = (e) => { S.pauseOnCritical = e.target.checked; if (!e.target.checked) { pausedCritKey = null; clearCritBanner(); } };
-$("critResume")?.addEventListener("click", resumeFromCritical);
+$("critResume")?.addEventListener("click", resumeSim);
+// Report closed / Explore Mission Control: the coach is done, so drop any PAUSED state.
+bus.addEventListener("report-close", () => {
+  clearCritBanner();
+  if (isPaused()) resumeSim();
+});
 $("replayPauseBtn")?.addEventListener("click", () => {
   if (!replayHandle) return;
   if (replayPaused || replayHandle.paused) {
-    replayHandle.resume();
-    replayPaused = false;
-    $("replayPauseBtn").textContent = "Pause";
-    clearCritBanner();
+    resumeSim();
   } else {
     replayHandle.pause();
     replayPaused = true;
-    $("replayPauseBtn").textContent = "Resume";
+    updateBanners();
   }
 });
 $("csvIngest")?.addEventListener("change", async (e) => {
