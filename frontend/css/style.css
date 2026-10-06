@@ -108,6 +108,17 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 #cascade { flex: 1; width: 100%; min-height: 220px; }
 .story-line { flex: none; margin-top: 8px; font-size: 13px; color: var(--mut); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #console.has-fault .story-line { color: var(--saf2); }
+.story-card { flex: none; margin-top: 8px; font-size: 13px; line-height: 1.35; color: var(--mut); display: flex; flex-direction: column; gap: 2px; }
+.story-card .story-row { display: flex; gap: 8px; min-width: 0; }
+.story-card .sk { flex: none; width: 92px; color: var(--dim); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
+.story-card .story-row span:last-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); font-size: 13px; }
+#console.has-fault .story-card .story-row span:last-child { color: var(--saf2); }
+.view-dock { margin-top: 8px; min-height: 160px; }
+.view-dock.collapsed #view { display: none; }
+.view-dock-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.view-dock-bar h3 { margin: 0; }
+.cascade-wrap .panel.view { display: none; } /* 3D docks under plans */
+.edge-chip { font-size: 12px; font-family: var(--mono); fill: var(--mut); pointer-events: none; }
 .view { position: absolute; right: 8px; bottom: 8px; width: 220px; height: 140px; z-index: 2;
   padding: 0; overflow: hidden; border: 1px solid var(--ln); border-radius: 10px; background: rgba(0,0,0,.55); }
 #console:not(.has-fault) .view { width: min(100%, 420px); height: 240px; left: 50%; top: 42%; right: auto; bottom: auto;
@@ -295,7 +306,8 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 .details-drawer .drawer-chevron { color: var(--saf); }
 .details-drawer.collapsed .drawer-body { display: none; }
 .details-drawer:not(.collapsed) .drawer-chevron { transform: rotate(180deg); }
-.details-drawer .drawer-body { max-height: min(42vh, 420px); overflow: auto; padding: 8px 12px 12px; border-top: 1px solid var(--ln2); }
+.details-drawer:not(.collapsed) .drawer-body { height: 280px; max-height: 280px; overflow: auto; padding: 8px 12px 12px; border-top: 1px solid var(--ln2); }
+.plan-chip { font: 600 10px Orbitron, sans-serif; letter-spacing: .06em; color: var(--saf); margin-left: 8px; }
 .ev-block { margin-bottom: 12px; }
 .ev-block h4 { margin: 0 0 6px; font-size: 12px; letter-spacing: .06em; color: var(--saf); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .tabs { display: flex; flex-direction: column; }
@@ -332,19 +344,18 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
   color: #cfeeff; font-size: 13px; font-weight: 600; letter-spacing: .02em; }
 .replay-banner.hidden { display: none; }
 
-/* guided demo — non-blocking side drawer */
+/* guided demo — bottom strip over center only (≤120px) */
 .spot { box-shadow: 0 0 0 2px var(--saf), 0 0 30px rgba(255,153,51,.45) !important; z-index: 3; }
 #coach { pointer-events: none; }
 #coach > * { pointer-events: auto; }
-.coach { position: fixed; right: 10px; top: 58px; bottom: 10px; left: auto; transform: none;
-  width: min(320px, 28vw); z-index: 20;
-  background: linear-gradient(180deg, rgba(34,24,16,.97), rgba(18,13,9,.97)); border: 1px solid var(--saf); border-radius: 14px;
-  padding: 14px 16px; box-shadow: 0 20px 60px rgba(0,0,0,.6); max-height: calc(100vh - 72px); overflow-y: auto; }
-.coach.top { top: 58px; bottom: 10px; }
-#console.guide-active .grid { padding-right: min(340px, 30vw); }
+.coach { position: fixed; left: max(12px, 16vw); right: max(12px, 22vw); bottom: 12px; top: auto; transform: none;
+  width: auto; z-index: 40; max-height: 120px; overflow-y: auto;
+  background: linear-gradient(180deg, rgba(34,24,16,.97), rgba(18,13,9,.97)); border: 1px solid var(--saf); border-radius: 12px;
+  padding: 10px 14px; box-shadow: 0 12px 40px rgba(0,0,0,.55); }
+.coach.top { top: auto; bottom: 12px; }
+#console.guide-active .grid { padding-right: 8px; }
 @media (max-width: 900px) {
-  .coach { width: min(720px, calc(100vw - 24px)); left: 50%; right: auto; bottom: 12px; top: auto;
-    transform: translateX(-50%); max-height: 42vh; }
+  .coach { left: 12px; right: 12px; max-height: 120px; transform: none; }
   #console.guide-active .grid { padding-right: 8px; }
 }
 .coach .step { font: 700 10px Orbitron, sans-serif; color: var(--saf); letter-spacing: .12em; margin-bottom: 4px; display: flex; justify-content: space-between; }
@@ -367,13 +378,14 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 .narr li.bad { border-color: var(--red); }
 .coach .x { background: none; border: 0; color: var(--dim); font-size: 12px; pointer-events: auto; }
 
-/* report as non-modal panel (not full-screen scrim) */
-.modal { position: fixed; right: 10px; top: 58px; bottom: 10px; left: auto; z-index: 30;
-  width: min(420px, 36vw); background: transparent; display: flex; align-items: stretch; justify-content: flex-end; padding: 0; pointer-events: none; }
-.modal .box { pointer-events: auto; width: 100%; max-height: 100%; overflow-y: auto; background: var(--pan2); border: 1px solid var(--ln); border-radius: 14px; padding: 18px; }
+/* report centered modal */
+.modal { position: fixed; inset: 0; z-index: 30; display: flex; align-items: center; justify-content: center;
+  padding: 12px; background: rgba(5,4,3,.72); pointer-events: auto; }
+.modal.hidden { display: none; }
+.modal .box { pointer-events: auto; width: min(960px, 92vw); max-height: 92vh; overflow-y: auto; background: var(--pan2); border: 1px solid var(--ln); border-radius: 14px; padding: 18px; }
 @media (max-width: 900px) {
-  .modal { inset: 0; width: auto; padding: 12px; background: rgba(5,4,3,.78); pointer-events: auto; align-items: center; justify-content: center; }
-  .modal .box { max-height: 92vh; width: min(980px, 100%); }
+  .modal { inset: 0; width: auto; padding: 12px; }
+  .modal .box { max-height: 92vh; width: min(960px, 92vw); }
 }
 .modal h2 { margin: 0 0 10px; font-size: clamp(16px, 2.5vw, 22px); }
 .res { padding: 10px 14px; border-radius: 12px; margin-bottom: 14px; font-size: 15px; }

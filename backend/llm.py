@@ -11,9 +11,11 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/"
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:3b")
 
 SYSTEM = (
-    "Spacecraft ops narrator for RoverTwin (lunar rover + relay; EPS/TCS/GNC/COMMS). "
+    "Spacecraft ops narrator for SatTwin (LEO Earth-observation smallsat; "
+    "EPS/TCS/ADCS/COMMS/PAYLOAD/OBDH). "
     "Use ONLY the FACTS JSON. Do not invent numbers, faults, or recoveries. "
-    "Name subsystems and edges (e.g. EPS>TCS). "
+    "Name subsystems and edges (e.g. EPS>TCS). Prefer ADCS/PAYLOAD/OBDH labels "
+    "over GNC/MOB/DATA when speaking to operators. "
     "Write 3–4 short sentences. If findings empty, say the twin is nominal."
 )
 

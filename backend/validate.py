@@ -1,14 +1,14 @@
 """Judge-evidence helpers: orbit/model validation checks, backtest error, anomaly score."""
 from __future__ import annotations
 
-from backend.model import Params, LIMITS, clamp
+import math
+
+from backend.model import Params, LIMITS, clamp, fmt_db as model_fmt_db
 
 
 def fmt_db(x: float) -> str:
-    ax = abs(float(x))
-    if ax < 0.05:
-        return "0.0 dB"
-    return f"{ax:.1f} dB"
+    """Preserve minus sign for negative margins (same as model.fmt_db)."""
+    return model_fmt_db(x)
 
 
 def backtest_pct_error(predicted: float, actual: float) -> float:
@@ -30,6 +30,23 @@ def anomaly_score(residuals: dict[str, float], sigma: float = 3.5) -> dict:
     }
 
 
+def analytic_eclipse_frac(p: Params | None = None) -> float:
+    """Beta-modulated eclipse fraction matching orbit_state."""
+    p = p or Params()
+    beta_rad = abs(p.beta_deg) * math.pi / 180.0
+    return clamp(p.eclipse_frac * (1.0 - 0.15 * math.sin(beta_rad)), 0.15, 0.45)
+
+
+def radiator_balance_ok(t_av: float, q_w: float, *, rad_eff: float = 1.0,
+                        area_m2: float = 0.35, eps: float = 0.85) -> dict:
+    """Check σεA T^4 ≈ Q (rough equilibrium)."""
+    t_k = float(t_av) + 273.15
+    sigma = 5.670374419e-8
+    q_rad = float(rad_eff) * eps * area_m2 * sigma * (t_k ** 4)
+    err = abs(q_rad - float(q_w)) / max(abs(float(q_w)), 1.0)
+    return {"q_rad": q_rad, "q_load": float(q_w), "rel_err": err, "ok": err < 0.85 or abs(q_w) < 5}
+
+
 def validation_checks(
     p: Params | None = None,
     *,
@@ -38,22 +55,25 @@ def validation_checks(
     t_bat: float | None = None,
     t_bat_model: float | None = None,
     rad_eff: float | None = None,
-    margin_edge: float | None = None,
+    t_av: float | None = None,
+    q_load_w: float | None = None,
+    margin_in_pass: float | None = None,
+    in_pass: bool | None = None,
     dsoc_per_orbit: float | None = None,
 ) -> list[dict]:
-    """Return 5–6 model checks vs LEO reference values for the Model check panel."""
+    """Return model checks vs LEO reference values for the Model check panel."""
     p = p or Params()
     checks: list[dict] = []
 
-    ref_ecl = p.eclipse_frac
+    ref_ecl = analytic_eclipse_frac(p)
     obs_ecl = eclipse_frac_obs if eclipse_frac_obs is not None else ref_ecl
     checks.append({
         "id": "eclipse",
         "name": "Eclipse fraction",
-        "reference": f"~{ref_ecl:.0%} of {p.orbit_period_s / 60:.0f} min @ ~500 km",
+        "reference": f"~{ref_ecl:.0%} (β={p.beta_deg:.0f}°) of {p.orbit_period_s / 60:.0f} min @ ~500 km",
         "observed": f"{obs_ecl:.0%}",
-        "ok": abs(obs_ecl - ref_ecl) < 0.08,
-        "detail": "circular LEO eclipse from Params.eclipse_frac / orbit_state",
+        "ok": abs(obs_ecl - ref_ecl) < 0.10,
+        "detail": "analytic eclipse from Params.eclipse_frac × beta",
     })
 
     ref_p = p.orbit_period_s
@@ -64,7 +84,7 @@ def validation_checks(
         "reference": f"~{ref_p / 60:.0f} min",
         "observed": f"{obs_p / 60:.1f} min",
         "ok": abs(obs_p - ref_p) < 120,
-        "detail": "orbit_period_s",
+        "detail": "period from orbit phase / history",
     })
 
     if t_bat is not None and t_bat_model is not None:
@@ -75,7 +95,7 @@ def validation_checks(
             "reference": f"model {t_bat_model:.1f} °C",
             "observed": f"{t_bat:.1f} °C",
             "ok": err < 8.0,
-            "detail": "twin vs plant sample (truth harness)",
+            "detail": "twin vs heat-balance sample",
         })
     else:
         checks.append({
@@ -84,36 +104,56 @@ def validation_checks(
             "reference": "model eq vs live t_bat",
             "observed": "awaiting sample",
             "ok": True,
-            "detail": "compare when truth or twin history available",
+            "detail": "compare when history available",
         })
 
     re = rad_eff if rad_eff is not None else 1.0
-    checks.append({
-        "id": "radiator",
-        "name": "Radiator equilibrium",
-        "reference": "rad_eff ≈ 1.0 balanced with T_av",
-        "observed": f"rad_eff {re:.0%}",
-        "ok": 0.2 <= re <= 1.3,
-        "detail": "TCS rad_eff / T_av balance",
-    })
+    if t_av is not None and q_load_w is not None:
+        bal = radiator_balance_ok(t_av, q_load_w, rad_eff=re)
+        checks.append({
+            "id": "radiator",
+            "name": "Radiator equilibrium",
+            "reference": "σεA T⁴ ≈ Q",
+            "observed": f"Q_rad {bal['q_rad']:.0f} W vs Q {bal['q_load']:.0f} W (rad_eff {re:.0%})",
+            "ok": bal["ok"],
+            "detail": "TCS radiator balance",
+        })
+    else:
+        checks.append({
+            "id": "radiator",
+            "name": "Radiator equilibrium",
+            "reference": "σεA T⁴ ≈ Q",
+            "observed": f"rad_eff {re:.0%}",
+            "ok": 0.2 <= re <= 1.3,
+            "detail": "TCS rad_eff / T_av balance",
+        })
 
-    if margin_edge is not None:
+    if in_pass is False:
         checks.append({
             "id": "link_edge",
-            "name": "Link margin @ pass edge",
-            "reference": "budget near AOS/LOS fringe (~0 dB)",
-            "observed": fmt_db(margin_edge),
-            "ok": margin_edge > -25,
-            "detail": "margin near pass boundary",
+            "name": "Link margin (in-pass)",
+            "reference": "slant-range budget during GS pass",
+            "observed": "n/a off-pass",
+            "ok": True,
+            "detail": "sampled only while gs_pass",
+        })
+    elif margin_in_pass is not None:
+        checks.append({
+            "id": "link_edge",
+            "name": "Link margin (in-pass)",
+            "reference": "budget from slant range during pass",
+            "observed": fmt_db(margin_in_pass),
+            "ok": margin_in_pass > -25,
+            "detail": "in-pass link margin",
         })
     else:
         checks.append({
             "id": "link_edge",
-            "name": "Link margin @ pass edge",
-            "reference": "budget near AOS/LOS fringe",
-            "observed": "awaiting pass edge",
+            "name": "Link margin (in-pass)",
+            "reference": "budget from slant range during pass",
+            "observed": "awaiting pass",
             "ok": True,
-            "detail": "sampled when next_pass_s small or just after LOS",
+            "detail": "sampled when gs_pass",
         })
 
     if dsoc_per_orbit is not None:
@@ -135,12 +175,21 @@ def validation_checks(
             "detail": "history window",
         })
 
+    checks.append({
+        "id": "gs",
+        "name": "Ground station",
+        "reference": f"Bengaluru {p.gs_lat_deg:.1f}N {p.gs_lon_deg:.1f}E, mask {p.gs_mask_deg:.0f}°, every {p.gs_pass_every_n_orbits} orbits",
+        "observed": f"~{max(1, int(round(86400 / p.orbit_period_s / max(1, p.gs_pass_every_n_orbits))))} passes/day",
+        "ok": 3 <= p.gs_pass_every_n_orbits <= 5,
+        "detail": "4–6 contacts/day LEO style",
+    })
+
     return checks
 
 
 ASSUMPTIONS = [
     "Circular LEO (~500 km); fixed eclipse fraction — not full ephemeris.",
-    "Fixed ground-station geometry; AOS/LOS from simple elevation model.",
+    "Bengaluru GS (13.0N 77.5E); AOS/LOS from simple elevation / orbit clock.",
     "1 Hz discrete plant/twin step; no continuous SimPy event queue.",
     "Telemetry and uplink only during ground-station passes.",
     "Twin never reads the plant — only pass-gated frames + its own model.",

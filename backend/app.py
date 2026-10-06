@@ -12,7 +12,9 @@ import asyncio
 import csv
 import io
 import logging
+import math
 import os
+import signal
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -23,7 +25,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .mission import Mission
 from .plant import FAULTS
@@ -35,7 +37,17 @@ TICK_S = 0.1
 PREDICT_EVERY_S = 1.5
 log = logging.getLogger("rovertwin.hub")
 
-store = Store(ROOT / "data" / "rovertwin.db")
+_db_path = Path(os.environ.get("SATTWIN_DB") or (ROOT / "data" / "rovertwin.db"))
+store = Store(_db_path)
+
+
+def _finite(name: str, v: float) -> float:
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise ValueError(f"{name} must be a number")
+    fv = float(v)
+    if not math.isfinite(fv):
+        raise ValueError(f"{name} must be finite (got {v!r})")
+    return fv
 
 
 @dataclass
@@ -100,7 +112,10 @@ class Hub:
     def handle(self, m: Mission, msg: dict, *, on_reset) -> None:
         op = msg.get("op")
         if op == "inject":
-            m.inject(msg["kind"], float(msg.get("severity", 0.8)), float(msg.get("ramp", 60)))
+            sev = _finite("severity", float(msg.get("severity", 0.8)))
+            if sev < 0 or sev > 1:
+                raise ValueError("severity must be in [0, 1]")
+            m.inject(msg["kind"], sev, float(msg.get("ramp", 60)))
         elif op == "clear":
             m.clear(msg["kind"])
         elif op == "cmd":
@@ -108,9 +123,11 @@ class Hub:
         elif op == "plan":
             m.run_plan(msg["id"])
         elif op == "speed":
-            m.speed = max(0.5, min(240.0, float(msg["value"])))
+            m.speed = max(0.5, min(240.0, _finite("speed", float(msg["value"]))))
         elif op == "pause":
-            m.paused = bool(msg["value"])
+            if not isinstance(msg.get("value"), bool):
+                raise ValueError("pause value must be boolean")
+            m.paused = msg["value"]
         elif op == "reset":
             on_reset()
             return
@@ -190,9 +207,22 @@ hub = Hub()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    loop = asyncio.get_running_loop()
+
+    def _sigterm(*_args):
+        log.info("SIGTERM received — shutting down")
+
+    try:
+        loop.add_signal_handler(signal.SIGTERM, _sigterm)
+    except (NotImplementedError, AttributeError, RuntimeError):
+        pass
     task = asyncio.create_task(hub.run())
     yield
     task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
     store.commit()
 
 
@@ -229,7 +259,11 @@ async def ws_endpoint(ws: WebSocket) -> None:
     sess.sent_event_id = sess.mission.event_seq
     try:
         while True:
-            msg = await ws.receive_json()
+            try:
+                msg = await ws.receive_json()
+            except Exception as exc:
+                await ws.send_json({"type": "error", "error": f"malformed JSON: {exc}"})
+                continue
             try:
                 if msg.get("op") == "reset":
                     hub.reset_session(sess)
@@ -239,7 +273,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 else:
                     hub.handle(sess.mission, msg, on_reset=lambda: None)
                     sess.force_predict = True
-            except (KeyError, ValueError) as exc:
+            except (KeyError, ValueError, TypeError) as exc:
                 await ws.send_json({"type": "error", "error": str(exc)})
     except WebSocketDisconnect:
         pass
@@ -253,6 +287,13 @@ class FaultIn(BaseModel):
     severity: float = Field(0.8, ge=0, le=1)
     ramp_s: float = Field(60, ge=0)
 
+    @field_validator("severity")
+    @classmethod
+    def sev_finite(cls, v: float) -> float:
+        if not math.isfinite(v):
+            raise ValueError("severity must be finite")
+        return v
+
 
 class CommandIn(BaseModel):
     name: str = Field(description="mode | drive | speed | payload | imu | trx | antenna | bat_isolated | pose | relay_hp")
@@ -263,6 +304,15 @@ class SimIn(BaseModel):
     speed: float | None = None
     paused: bool | None = None
 
+    @field_validator("speed")
+    @classmethod
+    def speed_ok(cls, v: float | None) -> float | None:
+        if v is None:
+            return v
+        if not math.isfinite(v):
+            raise ValueError("speed must be finite")
+        return v
+
 
 @app.get("/api/state", summary="Shared desk twin snapshot (REST). Console uses a private WebSocket mission.")
 def get_state() -> dict:
@@ -272,6 +322,13 @@ def get_state() -> dict:
 @app.get("/api/prediction", summary="Latest predicted impact and ranked recovery plans (shared desk)")
 def get_prediction() -> dict:
     return hub.mission.prediction or {}
+
+
+@app.get("/api/validate", summary="Model / orbit validation checks for Model check tab")
+def get_validate(session_id: str | None = None) -> dict:
+    sess = hub.session_by_id(session_id)
+    m = sess.mission if sess else hub.mission
+    return m.validation_report()
 
 
 @app.get("/api/faults", summary="Fault types that can be injected")
@@ -290,6 +347,10 @@ def post_fault(f: FaultIn) -> dict:
 
 @app.delete("/api/faults/{kind}", summary="Clear an injected fault (test harness)")
 def delete_fault(kind: str) -> dict:
+    if kind not in FAULTS:
+        raise HTTPException(404, f"unknown fault {kind}")
+    if kind not in hub.mission.plant.faults:
+        raise HTTPException(404, f"fault {kind} not active")
     hub.mission.clear(kind)
     return {"ok": True}
 
@@ -381,22 +442,29 @@ def get_csv() -> StreamingResponse:
 
 class CsvIngestBody(BaseModel):
     csv: str = Field(description="telemetry.csv text (same columns as GET /api/telemetry.csv)")
+    session_id: str | None = Field(None, description="Target WebSocket console session")
 
 
-@app.post("/api/telemetry/ingest", summary="Ingest recorded telemetry CSV into the shared-desk twin (local judge evidence)")
+@app.post("/api/telemetry/ingest", summary="Ingest recorded telemetry CSV into the twin (local judge evidence)")
 def ingest_csv(body: CsvIngestBody) -> dict:
     buf = io.StringIO(body.csv)
     reader = csv.DictReader(buf)
     rows = list(reader)
     if not rows:
-        raise HTTPException(400, "empty CSV")
-    result = hub.mission.ingest_csv_rows(rows)
+        raise HTTPException(422, detail={"message": "empty CSV", "errors": []})
+    sess = hub.session_by_id(body.session_id)
+    m = sess.mission if sess else hub.mission
+    result = m.ingest_csv_rows(rows)
+    if result.get("errors") and not result.get("ingested"):
+        raise HTTPException(422, detail={"message": "CSV validation failed", "errors": result["errors"]})
     return {
         "ok": True,
         "ingested": result["ingested"],
         "sync": result["sync"],
         "rx": result["rx"],
-        "state": result["snap"].get("sync"),
+        "errors": result.get("errors") or [],
+        "anomalies": result.get("anomalies", 0),
+        "state": (result.get("snap") or {}).get("sync"),
     }
 
 

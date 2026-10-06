@@ -8,6 +8,7 @@ const NODES = {
 };
 const STATUS_COLOR = { NOMINAL: "#3ecf6a", WATCH: "#ffb02e", WARNING: "#ff7a3d", CRITICAL: "#ff4d3a" };
 const NS = "http://www.w3.org/2000/svg";
+const VIEW_W = 520, VIEW_H = 200;
 
 function el(tag, attrs, parent) {
   const e = document.createElementNS(NS, tag);
@@ -68,11 +69,13 @@ export class Cascade {
     path.style.pointerEvents = "stroke";
     path.style.cursor = "help";
     const tip = el("title", {}, path);
+    // Chip sits on the curve midpoint (t = .5), not the control point, so it stays on the edge.
+    const mx = 0.25 * sx + 0.5 * cx + 0.25 * ex, my = 0.25 * sy + 0.5 * cy + 0.25 * ey;
     const lg = el("g", {}, this.gLabels);
-    const bg = el("rect", { class: "elabel-bg", rx: 3, height: 13 }, lg);
-    const tx = el("text", { class: "elabel", x: cx, y: cy + 3, "text-anchor": "middle" }, lg);
+    const bg = el("rect", { class: "elabel-bg", rx: 4, height: 17 }, lg);
+    const tx = el("text", { class: "elabel", x: mx, y: my + 4, "text-anchor": "middle" }, lg);
     const tip2 = el("title", {}, lg);
-    return (this.edges[key] = { path, tip, tip2, lg, bg, tx, cx, cy });
+    return (this.edges[key] = { path, tip, tip2, lg, bg, tx, cx: mx, cy: my, w: 0 });
   }
 
   update(couplings, subsystems, activeKeys) {
@@ -98,17 +101,28 @@ export class Cascade {
       const tip = edgeTooltip(key, label);
       e.tip.textContent = tip;
       e.tip2.textContent = tip;
-      const show = s >= 0.2 || onPath;
+      // Short 12px chip only (e.g. "heat 60 W"); full equation lives in the tooltip + Evidence table.
+      const onText = (onPath || s >= 0.35) ? edgeLabel(key, label) : "";
+      const show = (s >= 0.2 || onPath) && !!onText;
       e.lg.style.display = show ? "" : "none";
       e.lg.style.opacity = hasFocus && !onPath ? "0.25" : "1";
-      // Full equation why-text stays on hover title only on the main screen
-      const onText = onPath ? edgeLabel(key, label) : (s >= 0.35 ? edgeLabel(key, label) : "");
       if (show && e.tx.textContent !== onText) {
         e.tx.textContent = onText;
-        const w = Math.min(180, Math.max(24, e.tx.getComputedTextLength() + 8));
+        let tl = 0;
+        try { tl = e.tx.getComputedTextLength(); } catch { tl = 0; }
+        if (!tl) tl = onText.length * 6.6; // svg not laid out yet
+        const w = Math.min(96, Math.max(30, tl + 10));
+        // Keep the chip inside the viewBox so it never clips at the edge of the graph.
+        const x = Math.min(VIEW_W - w / 2 - 2, Math.max(w / 2 + 2, e.cx));
+        const y = Math.min(VIEW_H - 10, Math.max(10, e.cy));
+        e.w = w;
+        e.tx.setAttribute("x", x);
+        e.tx.setAttribute("y", y + 4);
         e.bg.setAttribute("width", w);
-        e.bg.setAttribute("x", e.cx - w / 2);
-        e.bg.setAttribute("y", e.cy - 7);
+        e.bg.setAttribute("x", x - w / 2);
+        e.bg.setAttribute("y", y - 8.5);
+        e.px = x;
+        e.py = y;
       }
     }
     // Hop numbers along highlighted path
@@ -117,7 +131,7 @@ export class Cascade {
     ordered.forEach((key, i) => {
       const e = this.edges[key];
       if (!e) return;
-      const t = el("text", { class: "hop-num", x: e.cx, y: e.cy - 12, "text-anchor": "middle" }, this.gHops);
+      const t = el("text", { class: "hop-num", x: e.px ?? e.cx, y: (e.py ?? e.cy) - 13, "text-anchor": "middle" }, this.gHops);
       t.textContent = String(i + 1);
     });
     for (const sub of subsystems || []) {

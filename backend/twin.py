@@ -130,6 +130,14 @@ class DigitalTwin:
         self.frames_since_est = 0
         self.terrain = 1.0
         self._status_prev: dict[str, str] = {}
+        self._aos_t: float | None = None
+        self._frames_since_aos = 0
+        self._was_gs_pass = False
+        self._last_rul_tick_t = -1e9
+        self._r_ewma: float | None = None
+        self._chain_path: tuple | None = None
+        self._chain_path_since: float = -1e9
+        self._chain_emitted: tuple | None = None
 
     # ------------------------------------------------------------ propagation
     def propagate(self, dt: float, t_now: float) -> None:
@@ -138,22 +146,41 @@ class DigitalTwin:
         self.expected = [e for e in self.expected if e[0] > t_now]
         self.prev = self.s.clone()
         self.o = step(self.s, self.h, self.p, dt, self.terrain)
+        gs = bool(self.o.get("gs_pass"))
+        if gs and not self._was_gs_pass:
+            self._aos_t = t_now
+            self._frames_since_aos = 0
+        if not gs:
+            self._aos_t = None
+            self._frames_since_aos = 0
+        self._was_gs_pass = gs
         if self.sync == "BLIND":
             for e in self.o["events"]:
                 self.events.append(("TWIN", f"Twin expects (unconfirmed): {e}"))
-            if self.rx >= 8 and self.o.get("gs_pass"):
-                self._explain_silence()
+            if self.rx >= 8 and gs:
+                self._explain_silence(t_now)
             self._detect()
+        self._update_rul_ewma(t_now)
         self._update_sync(t_now, dt)
 
-    def _explain_silence(self) -> None:
-        """Silence is evidence too: if the model says the downlink should
-        close but no frames arrive, raise the transponder-loss estimate just
-        enough to explain the loss of signal."""
+    def _explain_silence(self, t_now: float) -> None:
+        """Silence is evidence too — but only after AOS has been open long enough
+        with zero frames and the link budget predicts a usable margin."""
         s, p = self.s, self.p
-        if not self.o["down_ok"] or s.dead or s.cfg.trx != "A":
+        if not self.o.get("gs_pass") or s.dead or s.cfg.trx != "A":
+            return
+        aos_t = self._aos_t
+        if aos_t is None or (t_now - aos_t) < p.silence_aos_s:
+            return
+        if self._frames_since_aos > 0:
             return
         lb = link_budget(s.cfg, s.att_err, s.t_av, s.v_bus, s.t, 0.0, p)
+        # Predicted margin with healthy TRX must be positive before blaming TRX-A
+        if lb["margin"] <= 0.0:
+            return
+        if not self.o.get("down_ok") and lb["margin"] - self.h.trx_a_loss_db <= 0:
+            # Model already expects closed link for other reasons
+            pass
         threshold = 10 * math.log10(p.rate_min_kbps / p.rate_max_kbps)
         if lb["point"] > 10.0 or lb["brown"] > 3.0:
             if "silence_other" not in self.reported:
@@ -230,6 +257,8 @@ class DigitalTwin:
         self.last_frame_t = t_now
         self.last_rate = f["rate"]
         self.last_frame = f
+        if self.o.get("gs_pass") or self._aos_t is not None:
+            self._frames_since_aos += 1
 
         # twin's own predicted rates over the last step (before correction)
         pred = {
@@ -431,10 +460,23 @@ class DigitalTwin:
     def subsystems(self) -> list[dict]:
         s, h, o, c = self.s, self.h, self.o, self.s.cfg
         cap, r_mult, leak = (0.5, 2.0, 0.0) if c.bat_isolated else (h.bat_capacity_frac, h.bat_r_mult, h.bat_leak_w)
+        # EPS blends health with live bus / SoC / net power (not health alone)
+        net_w = float(o.get("p_sol", 0) or 0) - float(o.get("p_load", 0) or 0)
+        v_bus = float(o.get("v_bus", s.v_bus) or s.v_bus)
+        eps_health = 100 - 60 * (1 - cap) - 6 * max(0, r_mult - 1) - 1.0 * leak
+        eps_state = (
+            100
+            - max(0, 0.35 - s.soc) * 200
+            - max(0, 27.0 - v_bus) * 8
+            - max(0, -net_w) * 0.15
+            - max(0, s.t_bat - LIMITS["t_bat_max"] + 10) * 2.5
+        )
+        eps = 0.45 * eps_health + 0.55 * eps_state
         sc = {
-            "EPS": 100 - 60 * (1 - cap) - 6 * max(0, r_mult - 1) - 1.0 * leak - max(0, 0.35 - s.soc) * 200
-                   - max(0, s.t_bat - LIMITS["t_bat_max"] + 10) * 2.5,
-            "TCS": 100 - 100 * max(0, 1 - h.rad_eff) - max(0, s.t_av - 45) * 2.5 - max(0, -10 - s.t_av) * 3,
+            "EPS": eps,
+            "TCS": (100 - 100 * max(0, 1 - h.rad_eff)
+                    - max(0, s.t_av - 45) * 2.5 - max(0, -10 - s.t_av) * 3
+                    - max(0, s.t_bat - 45) * 2.5),  # WARN when battery > 45 °C
             "GNC": 100 - (300 * h.imu_a_bias if c.imu == "A" else 8) - max(0, s.att_err - 1) * 6
                    - max(0, (o.get("wheel_rpm") or s.wheel_rpm) / self.p.wheel_cap_rpm - 0.7) * 40,
             "COMMS": (
@@ -449,7 +491,7 @@ class DigitalTwin:
             ),
             "DATA": 100 - 80 * s.buffer_mb / self.p.buffer_cap_mb,
         }
-        # Knock-on via live couplings so PAYLOAD/ADCS tiles drop in battery demos
+        # Knock-on via live couplings only (no hard-coded root score floors)
         coup = o.get("couplings") or {}
         for edge, pen in (("EPS>MOB", 45), ("GNC>MOB", 40), ("TCS>MOB", 35),
                           ("EPS>GNC", 30), ("TCS>GNC", 25), ("EPS>COMMS", 20)):
@@ -464,13 +506,6 @@ class DigitalTwin:
             sc["MOB"] = min(sc["MOB"], 50)
         found = self.confirmed_findings()
         roots = {f["sub"] for f in found if not f["contained"]}
-        # Battery / EPS root always knocks PAYLOAD + ADCS tiles below 100 for cascade visibility
-        if "EPS" in roots:
-            sc["MOB"] = min(sc["MOB"], max(35.0, 50 + 0.35 * sc["EPS"]))
-            sc["GNC"] = min(sc["GNC"], max(40.0, 70 + 0.25 * sc["EPS"]))
-        if "TCS" in roots:
-            sc["MOB"] = min(sc["MOB"], 70)
-            sc["GNC"] = min(sc["GNC"], 75)
         contained = {f["sub"]: f["contained"] for f in found if f["contained"]}
         out = []
         for sub, score in sc.items():
@@ -479,26 +514,40 @@ class DigitalTwin:
             if sub in contained and sub not in roots:
                 cause = f"fault contained: {contained[sub]}"
             elif sub not in roots and score < 100:
-                cause = knock_on_cause(sub, o["couplings"], roots) or (
-                    "knock-on from EPS power bus" if "EPS" in roots and sub in ("MOB", "GNC") else ""
-                )
+                cause = knock_on_cause(sub, o["couplings"], roots) or ""
             status = status_with_hysteresis(score, self._status_prev.get(sub))
             self._status_prev[sub] = status
             out.append({"id": sub, "score": round(score), "status": status,
                         "root": sub in roots, "cause": cause})
         return out
 
-    def prognostics(self) -> dict:
+    def _update_rul_ewma(self, t_now: float) -> None:
+        """Update fade / R_int EWMA once per sim tick (not per snapshot poll)."""
+        if t_now - self._last_rul_tick_t < 0.5:
+            return
+        self._last_rul_tick_t = t_now
         h, s = self.h, self.s
-        fade_inst = 0.0002 * 2 ** ((s.t_bat - 25.0) / 10.0) * (1 + self.h.bat_leak_w / 20.0)
+        fade_inst = 0.0002 * 2 ** ((s.t_bat - 25.0) / 10.0) * (1 + h.bat_leak_w / 20.0)
         if self._fade_ewma is None:
             self._fade_ewma = fade_inst
         else:
-            self._fade_ewma = 0.85 * self._fade_ewma + 0.15 * fade_inst
-        fade_per_day = self._fade_ewma
+            self._fade_ewma = 0.92 * self._fade_ewma + 0.08 * fade_inst
+        r_inst = h.bat_r_mult
+        if self._r_ewma is None:
+            self._r_ewma = r_inst
+        else:
+            self._r_ewma = 0.95 * self._r_ewma + 0.05 * r_inst
+
+    def prognostics(self) -> dict:
+        h, s = self.h, self.s
+        fade_per_day = self._fade_ewma if self._fade_ewma is not None else (
+            0.0002 * 2 ** ((s.t_bat - 25.0) / 10.0) * (1 + h.bat_leak_w / 20.0)
+        )
+        # Capacity fade from EWMA; R_int trend steepens fade slightly
+        r_trend = max(0.0, (self._r_ewma or h.bat_r_mult) - 1.0)
+        fade_per_day = fade_per_day * (1.0 + 0.15 * r_trend)
         raw_cap = 0.5 if s.cfg.bat_isolated else h.bat_capacity_frac
         cap = clamp(raw_cap, 0.0, 1.0)
-        # EWMA RUL ready after ≥10 capacity estimator samples
         confident = self.n_est.get("cap", 0) >= 10 or s.cfg.bat_isolated
         if not confident:
             days = None

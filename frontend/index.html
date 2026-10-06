@@ -116,27 +116,38 @@
         <h3>HOW IT SPREADS</h3>
         <div class="cascade-wrap">
           <svg id="cascade" viewBox="0 0 520 200" preserveAspectRatio="xMidYMid meet"></svg>
-          <div class="panel view" id="view">
-            <div class="view-overlay hidden" id="viewChips"></div>
-            <div class="ticker hidden" id="ticker"></div>
-          </div>
         </div>
-        <div id="storyLine" class="story-line" aria-live="polite">Diagnosis: — · Next: —</div>
+        <div id="storyCard" class="story-card" aria-live="polite">
+          <div class="story-row"><span class="sk" id="storyDiagK">Diagnosis</span> <span id="storyDiag">—</span></div>
+          <div class="story-row"><span class="sk" id="storyNextK">Next</span> <span id="storyNext">—</span></div>
+          <div class="story-row"><span class="sk" id="storyRecK">Recommended</span> <span id="storyRec">—</span></div>
+        </div>
       </div>
+      <div id="coach" class="coach hidden" role="dialog" aria-live="polite"></div>
     </section>
 
     <aside class="col right" id="rightCol">
       <div class="panel shell" id="plansPanel">
         <h3>HOW TO FIX IT</h3>
+        <div id="planRun" class="plan-run hidden" aria-live="polite"></div>
         <div id="actWait" class="act-wait"></div>
         <div id="plans"></div>
         <button class="more hidden" id="morePlans" type="button"></button>
       </div>
+      <div class="panel shell view-dock" id="viewDock">
+        <div class="view-dock-bar">
+          <h3>SPACECRAFT 3D</h3>
+          <button type="button" class="tbtn" id="viewToggle" title="Show / hide 3D">Hide</button>
+        </div>
+        <div class="view" id="view">
+          <div class="view-overlay hidden" id="viewChips"></div>
+          <div class="ticker hidden" id="ticker"></div>
+        </div>
+      </div>
     </aside>
   </main>
 
-  <div id="coach" class="coach hidden" role="dialog" aria-live="polite"></div>
-  <div id="report" class="modal hidden" role="dialog"></div>
+  <div id="report" class="modal hidden" role="dialog" aria-modal="true" aria-label="Mission report"></div>
 
   <div class="panel tabs details-drawer collapsed" id="morePanel">
     <button type="button" class="drawer-bar" id="drawerToggle" aria-expanded="false">

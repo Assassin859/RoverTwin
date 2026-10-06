@@ -4,7 +4,7 @@ import pytest
 from backend.mission import Mission
 from backend.plant import RadioLink, RoverPlant
 
-SETTLE_S, AFTER_S = 1500, 12000  # ~2+ orbits of pass-gated telemetry after onset
+SETTLE_S, AFTER_S = 1500, 22000  # sparse GS (~every 3 orbits): need ≥1 contact after onset
 
 
 

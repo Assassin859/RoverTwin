@@ -17,7 +17,7 @@ EDGE_TEXT = {
     "GNC>EPS": "ADCS compute draws extra power",
     "GNC>MOB": "Poor pointing kills imaging quality",
     "COMMS>EPS": "Signal search draws extra power",
-    "COMMS>DATA": "Off-pass / link lost — OBDH buffer filling",
+    "COMMS>DATA": "Downlink stalled — OBDH buffer filling",
     "MOB>EPS": "Payload and wheels taxing the battery",
     "TCS>EPS": "Thermal load feeds back onto power",
 }
@@ -56,6 +56,8 @@ class CascadeTracker:
         self._live_findings: list[dict] = []
         self._live_subs: list[dict] = []
         self._live_coup: dict = {}
+        self._pending: dict[str, float] = {}  # sid -> first-seen sim t
+        self._debounce_s = 10.0
 
     def reset(self) -> None:
         self.stages.clear()
@@ -64,6 +66,7 @@ class CascadeTracker:
         self._live_findings = []
         self._live_subs = []
         self._live_coup = {}
+        self._pending.clear()
 
     def _renumber(self) -> None:
         self.stages.sort(key=lambda st: (KIND_ORDER.get(st["kind"], 9), st.get("t", 0), st["id"]))
@@ -199,24 +202,49 @@ class CascadeTracker:
             return {"new": new, "retracted": resolved, "resolved": resolved}
 
         # 2) Lit correlation edges (from confirmed-root paths only)
+        # Debounce ≥10 s stable before emit so brownout flaps do not spam the chain.
         active = correlations.get("active") or []
         coup = couplings or {}
+        lit_now: set[str] = set()
         for edge in active:
             val = coup.get(edge)
             s = float(val[0]) if isinstance(val, (list, tuple)) else float(val or 0)
             if s < EDGE_LIT:
                 continue
+            lit_now.add(edge)
             sid = f"edge:{edge}"
+            if sid in self.seen:
+                continue
+            first = self._pending.get(sid)
+            if first is None:
+                self._pending[sid] = t
+                continue
+            if t - first < self._debounce_s:
+                continue
+            self._pending.pop(sid, None)
             st = self._add(sid, t, "edge", _live_edge_text(edge, coup),
                            sub=edge.split(">")[-1], edges=[edge])
             if st:
                 new.append(st)
+        # Drop pending edges that fell dark
+        for sid in list(self._pending):
+            if sid.startswith("edge:") and sid[5:] not in lit_now:
+                self._pending.pop(sid, None)
 
         for p in correlations.get("paths") or []:
             edges = p.get("edges") or []
             if len(edges) < 2:
                 continue
             sid = f"path:{'>'.join(edges)}"
+            if sid in self.seen:
+                break
+            first = self._pending.get(sid)
+            if first is None:
+                self._pending[sid] = t
+                break
+            if t - first < self._debounce_s:
+                break
+            self._pending.pop(sid, None)
             chain = " → ".join([p["from"], *(p.get("via") or []), p["to"]])
             st = self._add(sid, t, "path", f"Chain reaction path: {chain}",
                            sub=p.get("to", ""), edges=list(edges))
@@ -248,11 +276,7 @@ class CascadeTracker:
                            sub="DATA", edges=[])
             if st:
                 new.append(st)
-        if self._prev["down_ok"] and not down_ok:
-            st = self._add("loss:link", t, "loss", "Capability loss: downlink lost / off-pass",
-                           sub="COMMS", edges=["GNC>COMMS", "TCS>COMMS", "EPS>COMMS"])
-            if st:
-                new.append(st)
+        # Skip "downlink lost / off-pass" capability loss — off-pass is nominal LEO geometry.
 
         # 5) FDIR
         if self._prev["mode"] != "SAFE" and mode == "SAFE":
@@ -299,7 +323,13 @@ class CascadeTracker:
                     s["text"] = frozen
                     s["text_frozen"] = frozen
                 else:
-                    s["text"] = _live_edge_text(s["edges"][0], coup)
+                    edge = s["edges"][0]
+                    s["text"] = _live_edge_text(edge, coup)
+                    val = coup.get(edge)
+                    strength = float(val[0]) if isinstance(val, (list, tuple)) else float(val or 0)
+                    s["strength"] = round(strength, 3)
+                    if isinstance(val, (list, tuple)) and len(val) > 1:
+                        s["value"] = val[1]
             elif kind == "sub" and not s.get("resolved"):
                 sub = subs.get(s.get("sub") or "")
                 if sub and sub.get("cause"):
@@ -310,6 +340,15 @@ class CascadeTracker:
                     frozen = f"Resolved: {frozen}"
                 s["text"] = frozen
                 s["text_frozen"] = frozen
+            # Hide zero-strength live edges
+            if kind == "edge" and not s.get("resolved"):
+                strength = s.get("strength")
+                if strength is None:
+                    edge = (s.get("edges") or [""])[0]
+                    val = coup.get(edge)
+                    strength = float(val[0]) if isinstance(val, (list, tuple)) else float(val or 0)
+                if strength < 0.02:
+                    continue
             stages.append(s)
         active = [x for x in stages if not x.get("resolved")]
         latest = (active[-1] if active else stages[-1] if stages else None)

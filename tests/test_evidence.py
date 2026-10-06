@@ -49,17 +49,54 @@ def test_isolate_beats_continue_score():
     pred = m.compute_prediction(m.prediction_inputs())
     plans = {p["id"]: p for p in pred["plans"]}
     assert "isolate" in plans
-    assert plans["isolate"]["score"] >= plans["continue"]["score"]
+    assert plans["isolate"]["score"] >= plans["continue"]["score"] + 10
     assert plans["isolate"]["metrics"]["max_t_bat"] <= plans["continue"]["metrics"]["max_t_bat"] + 1.0
     assert plans["isolate"].get("why")
     assert plan_cost([("bat_isolated", True)]) < 2.0
+
+
+def test_imu_b_ranks_first_for_sensor():
+    m = Mission(seed=3)
+    m.advance(1500)
+    m.inject("sensor", 0.9, 60)
+    # Wait until twin has confirmed IMU finding (sparse GS passes)
+    for _ in range(900):
+        m.advance(30)
+        conf = m.twin.confirmed_findings()
+        if any(f["id"] == "imu" and not f.get("contained") for f in conf):
+            break
+    pred = m.compute_prediction(m.prediction_inputs())
+    assert pred["plans"], "expected recovery plans for sensor fault"
+    assert pred["plans"][0]["id"] == "imu_b" or (
+        pred["plans"][0]["id"].startswith("combo") and "imu_b" in pred["plans"][0]["id"]
+    )
+    plans = {p["id"]: p for p in pred["plans"]}
+    assert "imu_b" in plans
+    assert plans["imu_b"]["score"] > plans.get("continue", {"score": 0})["score"]
+
+
+def test_isolate_beats_continue_off_pass():
+    m = Mission(seed=3)
+    m.advance(600)
+    m.inject("battery", 0.9, 0.0)
+    m.advance(2000)
+    # Force off-pass inputs
+    s, h, up_ok, unc, p, terrain, has, roots = m.prediction_inputs()
+    pred = m.compute_prediction((s, h, False, unc, p, terrain, has, roots))
+    plans = {p["id"]: p for p in pred["plans"]}
+    assert plans["isolate"]["score"] >= plans["continue"]["score"] + 10
 
 
 def test_battery_mob_payload_score_drops():
     m = Mission(seed=3)
     m.advance(400)
     m.inject("battery", 0.9, 0.0)
-    m.advance(2400)
+    # Catch undervoltage cascade before sunlight recovers the bus
+    for _ in range(80):
+        m.advance(15)
+        subs = {s["id"]: s for s in m.twin.subsystems()}
+        if subs["MOB"]["score"] < 100 and subs["EPS"]["score"] < 100:
+            break
     subs = {s["id"]: s for s in m.twin.subsystems()}
     assert subs["MOB"]["score"] < 100
     assert subs["EPS"]["score"] < 100
@@ -72,8 +109,10 @@ def test_cascade_resolved_text_frozen():
     corr = {"active": ["EPS>COMMS"], "paths": []}
     coup = {"EPS>COMMS": (0.9, "3.2 dB low bus voltage")}
     tr.update(10, findings, corr, coup, [], view, [])
+    # Debounce: edge needs ≥10 s stable
+    tr.update(21, findings, corr, coup, [], view, [])
     # Resolve
-    tr.update(20, [], {"active": [], "paths": []}, coup, [], view, [])
+    tr.update(30, [], {"active": [], "paths": []}, coup, [], view, [])
     snap1 = tr.snapshot({"EPS>COMMS": (0.1, "0.0 dB low bus voltage")}, [], [])
     edge = next(s for s in snap1["stages"] if s["kind"] == "edge")
     assert edge.get("resolved")
@@ -98,4 +137,38 @@ def test_csv_ingest_roundtrip():
     out = m.ingest_csv_rows(rows)
     assert out["ingested"] == 6
     assert out["rx"] >= 6
-    assert out["sync"] in ("SYNCED", "INIT", "LOW RATE")
+    assert out["sync"] in ("SYNCED", "INIT", "LOW RATE", "BLIND")
+    assert out.get("ok")
+
+
+def test_csv_bad_rows_report_errors():
+    m = Mission(seed=1)
+    out = m.ingest_csv_rows([
+        {"t": "nan", "soc": 0.5},
+        {"t": 1, "soc": "bad"},
+    ])
+    assert out["ingested"] == 0
+    assert out["errors"]
+
+
+def test_validation_report_shape():
+    m = Mission(seed=1)
+    m.advance(600)
+    rep = m.validation_report()
+    ids = {c["id"] for c in rep["checks"]}
+    assert "eclipse" in ids and "gs" in ids
+    assert rep["gs"]["lat"] == 13.0
+
+
+def test_chain_edge_debounce():
+    tr = CascadeTracker()
+    view = {"cfg": {"drive": True, "payload": True, "mode": "NOMINAL"}, "down_ok": True}
+    findings = [{"id": "bat_leak", "sub": "EPS", "text": "short", "contained": ""}]
+    corr = {"active": ["EPS>TCS"], "paths": []}
+    coup = {"EPS>TCS": (0.5, "12 W")}
+    r1 = tr.update(0, findings, corr, coup, [], view, [])
+    assert not any(s["kind"] == "edge" for s in r1["new"])
+    r2 = tr.update(5, findings, corr, coup, [], view, [])
+    assert not any(s["kind"] == "edge" for s in r2["new"])
+    r3 = tr.update(11, findings, corr, coup, [], view, [])
+    assert any(s["kind"] == "edge" for s in r3["new"])

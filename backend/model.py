@@ -44,11 +44,12 @@ def clamp(v: float, lo: float, hi: float) -> float:
 
 
 def fmt_db(x: float) -> str:
-    """Sign-aware dB label — never emits '--0.0' or bare '-0.0'."""
-    ax = abs(float(x))
-    if ax < 0.05:
+    """Sign-aware dB label — preserves minus for negative margins."""
+    v = float(x)
+    if abs(v) < 0.05:
         return "0.0 dB"
-    return f"{ax:.1f} dB"
+    sign = "−" if v < 0 else ""
+    return f"{sign}{abs(v):.1f} dB"
 
 
 @dataclass(frozen=True)
@@ -75,7 +76,7 @@ class Params:
     c_av: float = 3200.0
     c_bat: float = 4000.0
     rad_eps_area: float = 0.42
-    g_ab: float = 1.2
+    g_ab: float = 2.4  # battery→avionics conduction (stronger for TCS WARN on bat heat)
     g_bat_env: float = 0.15
     q_sun_body: float = 28.0
     t_sink_sun: float = 255.0
@@ -101,11 +102,19 @@ class Params:
     relay_period_s: float = 5700.0
     orbit_period_s: float = 5700.0
     eclipse_frac: float = 0.35
-    gs_pass_frac: float = 0.14
+    gs_pass_frac: float = 0.14  # longer AOS window when contact orbit hits
     gs_pass_phase: float = 0.15
-    # DATA / OBDH
-    buffer_cap_mb: float = 48.0
-    science_mb_s: float = 0.012
+    # Pass every Nth orbit (~4–6 contacts/day for ~15–16 orbits/day LEO)
+    gs_pass_every_n_orbits: int = 3
+    # Ground station (ISRO Bengaluru) — used by validate / schedule docs
+    gs_lat_deg: float = 13.0
+    gs_lon_deg: float = 77.5
+    gs_mask_deg: float = 8.0  # 5–10° elevation mask
+    # Orbit beta angle (sun–orbit plane); eclipse analytic uses this
+    beta_deg: float = 25.0
+    # DATA / OBDH — sized so nominal off-pass fill stays under ~80%
+    buffer_cap_mb: float = 96.0
+    science_mb_s: float = 0.008
     hk_mb_s: float = 0.0004
     # FDIR
     soc_auto_safe: float = 0.18
@@ -117,6 +126,8 @@ class Params:
     search_after_s: float = 400.0
     comm_loss_timer_s: float = 500.0
     wheel_dump_rpm: float = 5500.0
+    uv_bus_v: float = 25.5  # undervoltage load-shed threshold
+    silence_aos_s: float = 20.0  # wait after AOS before blaming TRX
 
 
 @dataclass
@@ -176,32 +187,50 @@ class State:
 
 # ---------------------------------------------------------------- environment
 def orbit_state(t: float, p: Params | None = None) -> dict:
-    """LEO orbit clock: sunlit/eclipse and ground-station AOS/LOS."""
+    """LEO orbit clock: sunlit/eclipse and ground-station AOS/LOS.
+
+    Passes occur every ``gs_pass_every_n_orbits`` orbits (Bengaluru-style sparse
+    contacts). ``beta_deg`` modulates the analytic eclipse fraction.
+    """
     p = p or Params()
     period = p.orbit_period_s
     phase = (t % period) / period
     angle = 2.0 * math.pi * phase
     ecl = p.eclipse_frac
-    in_eclipse = phase < ecl * 0.5 or phase > 1.0 - ecl * 0.5
+    beta_rad = abs(p.beta_deg) * math.pi / 180.0
+    ecl_eff = clamp(ecl * (1.0 - 0.15 * math.sin(beta_rad)), 0.15, 0.45)
+    in_eclipse = phase < ecl_eff * 0.5 or phase > 1.0 - ecl_eff * 0.5
     sunlit = not in_eclipse
     half = p.gs_pass_frac * 0.5
     centre = p.gs_pass_phase
     d = min(abs(phase - centre), 1.0 - abs(phase - centre))
-    gs_pass = d <= half
+    orbit_i = int(math.floor(t / period))
+    n = max(1, int(p.gs_pass_every_n_orbits))
+    pass_orbit = (orbit_i % n) == 0
+    gs_pass = pass_orbit and d <= half
     pass_start = (centre - half) % 1.0
     if gs_pass:
         next_pass_s = 0.0
+        aos_age_s = ((phase - pass_start) % 1.0) * period
     else:
-        ahead = (pass_start - phase) % 1.0
-        next_pass_s = ahead * period
+        k = 0 if (pass_orbit and phase < pass_start) else 1
+        while ((orbit_i + k) % n) != 0:
+            k += 1
+            if k > n + 2:
+                break
+        next_t = (orbit_i + k) * period + pass_start * period
+        next_pass_s = max(0.0, next_t - t)
+        aos_age_s = 0.0
     return {
         "angle": angle,
         "phase": phase,
         "sunlit": sunlit,
         "eclipse": in_eclipse,
         "gs_pass": gs_pass,
-        "next_pass_s": next_pass_s,
-        "beta": 0.0,
+        "next_pass_s": float(next_pass_s),
+        "aos_age_s": float(aos_age_s),
+        "beta": p.beta_deg,
+        "eclipse_frac_eff": ecl_eff,
     }
 
 
@@ -241,7 +270,7 @@ def link_budget(c: Config, att_err: float, t_av: float, v_bus: float, t: float,
         gain, point = p.lga_gain_db, 0.0
     trx = trx_a_loss_db if c.trx == "A" else p.trx_b_loss_db
     temp = 0.2 * max(0.0, t_av - 45.0)
-    brown = -10.0 * math.log10(max(clamp((v_bus - 21.5) / 2.5, 0.0, 1.0), 0.01))
+    brown = -10.0 * math.log10(max(clamp((v_bus - (p.uv_bus_v - 4.0)) / 2.5, 0.0, 1.0), 0.01))
     gs = p.relay_hp_db if c.relay_hp else 0.0
     margin = p.m0_db + gain + gs - point - trx - temp - brown
     return {"margin": margin, "point": point, "trx": trx, "temp": temp, "brown": brown}
@@ -384,6 +413,12 @@ def autonomy(s: State, p: Params) -> list[str]:
         c.drive = False
         c.payload = False
         ev.append("Attitude knowledge poor: payload imaging inhibited")
+    # Undervoltage FDIR: shed payload and cap wheels when bus sags (battery short)
+    if not s.dead and s.v_bus < p.uv_bus_v:
+        if c.payload or c.speed_frac > 0.5:
+            c.payload = False
+            c.speed_frac = min(c.speed_frac, 0.5)
+            ev.append(f"Undervoltage FDIR ({s.v_bus:.1f} V < {p.uv_bus_v:.1f} V): payload shed, wheel power capped")
     if s.no_contact_s > p.comm_loss_timer_s and (c.trx == "A" or c.antenna == "HGA"):
         c.trx, c.antenna = "B", "LGA"
         if c.mode != "SAFE":
@@ -406,9 +441,10 @@ def step(s: State, h: Health, p: Params, dt: float, terrain: float = 1.0) -> dic
     if c.pose == "SHADE" and sun > 0:
         sun *= 0.15
 
-    brown = clamp((s.v_bus - 21.5) / 2.5, 0.0, 1.0)
+    brown = clamp((s.v_bus - p.uv_bus_v) / 2.0, 0.0, 1.0)  # full torque at uv+2 V; capped below UV
+    uv = s.v_bus < p.uv_bus_v
     hot = max(0.0, s.t_av - 40.0) / 10.0
-    noise_mult = 1.0 + hot * hot + 2.0 * (1.0 - brown)
+    noise_mult = 1.0 + hot * hot + 2.0 * (1.0 - brown) + (1.2 if uv else 0.0)
     bias, imu_noise = (h.imu_a_bias, 1.0) if c.imu == "A" else (0.0, 1.6)
     bias += thermal_gyro_bias(s.t_av, p)
     fric = h.wheel_fric_mult * (1.0 + 0.4 * hot)
@@ -422,17 +458,19 @@ def step(s: State, h: Health, p: Params, dt: float, terrain: float = 1.0) -> dic
     sat = clamp(s.wheel_rpm / p.wheel_cap_rpm, 0.0, 1.0)
     wheel_cap = 1.0 - 0.7 * sat * (1.0 - brown)
     floor = p.att_floor * noise_mult * imu_noise / max(wheel_cap, 0.15)
-    s.att_err = clamp(s.att_err + (abs(bias) - (s.att_err - floor) / p.att_tau) * dt, 0.05, 60.0)
+    uv_bias = 0.025 if uv else 0.0  # undervoltage → slower wheel authority → knowledge drift
+    s.att_err = clamp(s.att_err + (abs(bias) + uv_bias - (s.att_err - floor) / p.att_tau) * dt, 0.05, 60.0)
     vo = clamp((s.att_err - 2.0) / 4.0, 0.0, 1.0) if alive else 0.0
     p_compute = p.p_compute + p.p_compute_vo * vo
     p_sens = (p.p_sensors_safe if safe else p.p_sensors) if alive else 0.0
 
     imaging = c.drive and c.payload and not safe and alive
     lim_eps = clamp((s.soc - 0.20) / 0.10, 0.0, 1.0)
+    lim_uv = brown  # undervoltage also cuts imaging duty
     lim_tcs = clamp(1.0 - (s.t_av - 55.0) / 15.0, 0.2, 1.0)
     lim_nav = clamp(1.0 - (s.att_err - 3.0) / 5.0, 0.0, 1.0)
     duty_cmd = c.speed_frac if imaging else 0.0
-    duty = duty_cmd * lim_eps * lim_tcs * lim_nav
+    duty = duty_cmd * lim_eps * lim_uv * lim_tcs * lim_nav
     p_mob = p.p_mobility_nom * duty * (0.4 + 0.6 * sat)
     s.heading = orb["angle"]
     s.x = math.cos(orb["angle"]) * p.loop_radius
@@ -523,11 +561,14 @@ def step(s: State, h: Health, p: Params, dt: float, terrain: float = 1.0) -> dic
                     f"gyro drift {thermal_gyro_bias(s.t_av, p):.3f}°/s, wheel fric x{fric:.1f}"),
         "TCS>COMMS": (clamp(temp_loss / 5.0, 0, 1), f"{fmt_db(temp_loss)} radio derate"),
         "TCS>MOB": (1.0 - lim_tcs, "thermal payload inhibit"),
-        "EPS>GNC": (clamp(2.0 * (1.0 - brown) + 0.8 * sat * (1.0 - brown), 0, 1),
+        "EPS>GNC": (clamp(2.0 * (1.0 - brown) + 0.8 * sat * (1.0 - brown) + (0.55 if uv else 0.0), 0, 1),
                     f"bus {v_bus:.1f} V — wheel torque capped"),
         "EPS>COMMS": (clamp(brown_db / 6.0, 0, 1), f"{fmt_db(brown_db)} low bus voltage"),
-        "EPS>MOB": (1.0 - lim_eps if duty_cmd > 0 else (0.4 if s.soc < 0.25 else 0.0),
-                    f"payload shed, SOC {s.soc:.0%}"),
+        "EPS>MOB": (clamp(max(1.0 - lim_eps, 1.0 - lim_uv,
+                              0.85 if (uv or not c.payload) else 0.0,
+                              0.4 if s.soc < 0.25 else 0.0), 0, 1)
+                    if (duty_cmd > 0 or uv or not c.payload or lim_uv < 0.95 or s.soc < 0.25) else 0.0,
+                    f"payload shed, bus {v_bus:.1f} V, SOC {s.soc:.0%}"),
         "GNC>COMMS": (clamp(point / 8.0, 0, 1), f"{fmt_db(point)} antenna mispointing"),
         "GNC>EPS": (vo, f"+{p.p_compute_vo * vo:.0f} W ADCS compute"),
         "GNC>MOB": (1.0 - lim_nav if duty_cmd > 0 else (1.0 if s.att_err > p.att_stop_deg else 0.0),

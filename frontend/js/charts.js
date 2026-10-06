@@ -20,7 +20,7 @@ export class Chart {
     this.ctx = canvas.getContext("2d");
   }
 
-  draw({ history, now, pred, plan, truthOn }) {
+  draw({ history, now, pred, plan, truthOn, markerT }) {
     const cv = this.cv, cfg = this.cfg, ctx = this.ctx;
     const dpr = Math.min(devicePixelRatio, 2);
     const W = cv.clientWidth, H = cv.clientHeight;
@@ -108,6 +108,13 @@ export class Chart {
     // now marker
     ctx.strokeStyle = "rgba(255,255,255,0.4)";
     ctx.beginPath(); ctx.moveTo(X(now), T); ctx.lineTo(X(now), T + ph); ctx.stroke();
+    // execute-time marker
+    if (markerT != null && markerT >= t0 && markerT <= now + 1) {
+      ctx.strokeStyle = "rgba(255,153,51,0.85)";
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath(); ctx.moveTo(X(markerT), T); ctx.lineTo(X(markerT), T + ph); ctx.stroke();
+      ctx.setLineDash([]);
+    }
 
     // title + current value
     ctx.font = "700 11px Orbitron, sans-serif";

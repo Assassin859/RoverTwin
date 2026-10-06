@@ -20,6 +20,7 @@ def test_command_queues_off_pass_and_delivers_in_pass():
     assert not m.twin.o.get("gs_pass")
     cmd = m.command("payload", False)
     assert "queued until next pass" in cmd["status"] or cmd["status"] == "queued"
-    # Run until next pass + latency
-    m.advance(p.orbit_period_s * 0.7)
+    # Sparse GS: wait until next AOS + latency (may be multiple orbits)
+    wait = float(m.twin.o.get("next_pass_s") or p.orbit_period_s) + 180.0
+    m.advance(wait)
     assert any(c["name"] == "payload" and c["status"] == "confirmed" for c in m.commands) or m.plant.s.cfg.payload is False

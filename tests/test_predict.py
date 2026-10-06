@@ -10,7 +10,7 @@ def predicted(m):
     return pred
 
 
-def wait_for_pass(m, limit_s=8000):
+def wait_for_pass(m, limit_s=22000):
     t0 = m.t
     while m.t - t0 < limit_s:
         if m.plant.o.get("up_ok"):
