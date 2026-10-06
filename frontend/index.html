@@ -31,12 +31,13 @@
       <p class="lead">A <b>telemetry-synchronised spacecraft digital twin</b> of a Moon rover + relay orbiter — not a dashboard of canned plots. Same satellite-ops problem (EPS / TCS / GNC·ADCS / COMMS): inject faults, see cause→effect cascades through the model, predict impact, and rank recovery before uplink.</p>
       <ul class="how">
         <li><b>MIRROR</b>Same physics model as the rover; corrected by telemetry.</li>
+        <li><b>SYNC</b>2.6 s latency, lossy/rate-limited; SYNCED / LOW RATE / BLIND — predicts through blackout.</li>
         <li><b>BREAK</b>Battery, thermal, sensor or radio faults, alone or together.</li>
         <li><b>PREDICT</b>Root cause + 2-hour forecast with ensemble bands.</li>
         <li><b>RECOVER</b>Every option simulated and scored before uplink.</li>
       </ul>
       <div class="ctas">
-        <button class="cta" id="goGuide">GUIDED DEMO · 3 MIN</button>
+        <button class="cta" id="goGuide">3-MIN JUDGE PATH</button>
         <button class="cta alt" id="goConsole">OPEN MISSION CONTROL</button>
       </div>
       <div class="conn off" id="conn">Ground segment: <b>connecting…</b></div>
@@ -57,7 +58,7 @@
     </div>
     <label class="toggle" title="Pause the sim once when the twin first predicts a hard limit violation"><input type="checkbox" id="pauseCrit" checked> Pause on critical</label>
     <label class="toggle" title="Test harness only: overlay the hidden plant state. The twin never sees this."><input type="checkbox" id="truth"> Show truth (test harness)</label>
-    <button class="tbtn hot" id="guideBtn">Guided demo</button>
+    <button class="tbtn hot" id="guideBtn">3-min judge path</button>
     <button class="tbtn" id="resetBtn">Reset</button>
     <a class="tbtn" href="/docs" target="_blank" rel="noopener">API</a>
   </header>
@@ -71,7 +72,7 @@
           <button class="tbtn" id="explainBtn" type="button" style="margin-left:auto;padding:2px 8px;font-size:11px">Explain</button>
         </h3>
         <div id="llmBadge" class="note">Checking Ollama…</div>
-        <div id="llmNote" class="llm-note">Inject a fault to see a grounded cause→effect narration.</div>
+        <div id="llmNote" class="llm-note" role="status" aria-live="polite">Inject a fault to see a grounded cause→effect narration.</div>
       </div>
     </aside>
 
@@ -80,7 +81,8 @@
         <div class="panel" id="cascadePanel">
           <h3>HOW IT SPREADS <small>live correlations from the model</small></h3>
           <svg id="cascade" viewBox="0 0 520 200" preserveAspectRatio="xMidYMid meet"></svg>
-          <div class="cascade-cap">Edges = live equations · lit path = root cause → effects · click a row below</div>
+          <div class="cascade-cap">Edges = live equations · lit path = root → effects · chain reaction = timed losses</div>
+          <div id="chainReaction" class="chain-reaction" aria-live="polite"></div>
           <div id="corrTable" class="corr-table"></div>
           <div id="corrMatrix" class="corr-matrix" title="Live 6×6 coupling strengths"></div>
         </div>

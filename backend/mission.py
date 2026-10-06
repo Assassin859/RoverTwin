@@ -11,6 +11,7 @@ from .plant import FAULTS, RadioLink, RoverPlant
 from .predict import PLAN_BY_ID, PLANS, predict_all
 from .store import Store
 from .twin import RESIDUALS, DigitalTwin
+from .cascade_chain import CascadeTracker
 
 HISTORY_DT = 10.0
 
@@ -22,6 +23,7 @@ class Mission:
         self.plant = RoverPlant(self.p, self.rng)
         self.link = RadioLink(self.p, self.rng)
         self.twin = DigitalTwin(self.p)
+        self.cascade = CascadeTracker()
         self.store = store
         self.t = 0.0
         self.speed = 30.0
@@ -64,7 +66,22 @@ class Mission:
                 self.store.frame(f)
         for kind, text in self.twin.events:
             self.log(kind, text)
+        fdir_texts = [text for kind, text in self.twin.events if kind == "FDIR"]
         self.twin.events = []
+        # Cascading loss stages (physics / FDIR — not secondary fault injects)
+        corr = self.twin.correlations()
+        coup = self.twin.o.get("couplings") or {}
+        new_stages = self.cascade.update(
+            self.t,
+            self.twin.findings(),
+            corr,
+            coup,
+            self.twin.subsystems(),
+            self.twin.view(),
+            fdir_texts,
+        )
+        for st in new_stages:
+            self.log("CASCADE", st["text"])
         if self.t - self._last_hist >= HISTORY_DT:
             self._last_hist = self.t
             sample = self.sample()
@@ -178,6 +195,7 @@ class Mission:
             "anomalies": sorted(tw.active_anoms),
             "couplings": {k: [round(v[0], 3), v[1]] for k, v in tw.o["couplings"].items()},
             "correlations": tw.correlations(),
+            "cascade_chain": self.cascade.snapshot(),
             "prognostics": tw.prognostics(),
             "faults": [{"kind": k, "severity": fl.severity, "level": fl.level(self.t)}
                        for k, fl in self.plant.faults.items()],

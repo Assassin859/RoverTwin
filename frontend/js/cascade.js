@@ -45,6 +45,15 @@ export class Cascade {
     this.highlight = new Set(keys || []);
   }
 
+  pulseEdges(keys, ms = 1200) {
+    for (const key of keys || []) {
+      const e = this.edges[key] || this._edge(key);
+      e.path.classList.add("pulse-flash");
+      clearTimeout(e._pulseTimer);
+      e._pulseTimer = setTimeout(() => e.path.classList.remove("pulse-flash"), ms);
+    }
+  }
+
   _edge(key) {
     if (this.edges[key]) return this.edges[key];
     const [a, b] = key.split(">");
@@ -78,8 +87,9 @@ export class Cascade {
       e.path.setAttribute("stroke", color);
       e.path.setAttribute("stroke-width", (onPath ? 2.5 + 4 * s : 1 + 4 * s).toFixed(2));
       let op = 0.35 + 0.65 * Math.min(1, s * 2);
-      if (hasFocus && !onPath) op *= 0.22;
+      if (hasFocus && !onPath) op *= 0.35;
       if (onPath) op = Math.max(op, 0.95);
+      if (active.has(key) && !onPath) op = Math.max(op, 0.55);
       e.path.setAttribute("opacity", op.toFixed(2));
       e.path.setAttribute("marker-end", `url(#arw-${lvl})`);
       e.path.classList.toggle("flow", s >= 0.12 || onPath);

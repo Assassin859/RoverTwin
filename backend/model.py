@@ -413,13 +413,16 @@ def step(s: State, h: Health, p: Params, dt: float, terrain: float = 1.0) -> dic
 
     # how strongly each subsystem is currently pushing on the others
     search_w = (p_comm - (p.p_comm_lga if c.antenna == "LGA" else p.p_comm_hga)) if searching else 0.0
+    # Conduction into avionics (hot pack → T_av) foreshadows gyro/radio thermal effects
+    cond_in = max(0.0, q_ab) / 12.0
     couplings = {
         "EPS>TCS": (clamp((loss + leak) / 30.0, 0, 1), f"{loss + leak:.0f} W battery heat"),
         "TCS>EPS": (clamp((q_h_av + q_h_bat) / 25.0 + max(0.0, s.t_bat - 40.0) / 20.0, 0, 1),
                     f"heaters {q_h_av + q_h_bat:.0f} W" if q_h_av + q_h_bat > 1 else f"battery at {s.t_bat:.0f}°C"),
-        "TCS>GNC": (clamp(hot * hot / 4.0 + thermal_gyro_bias(s.t_av, p) / 0.03, 0, 1),
-                    f"gyro drift {thermal_gyro_bias(s.t_av, p):.3f}°/s, noise x{noise_mult:.1f}"),
-        "TCS>COMMS": (clamp(temp_loss / 5.0, 0, 1), f"-{temp_loss:.1f} dB radio derate"),
+        "TCS>GNC": (clamp(hot * hot / 4.0 + thermal_gyro_bias(s.t_av, p) / 0.03 + cond_in, 0, 1),
+                    f"gyro drift {thermal_gyro_bias(s.t_av, p):.3f}°/s · {max(0.0, q_ab):.0f} W into avionics"),
+        "TCS>COMMS": (clamp(temp_loss / 5.0 + 0.35 * cond_in, 0, 1),
+                      f"-{temp_loss:.1f} dB radio derate" if temp_loss > 0.05 else f"{max(0.0, q_ab):.0f} W pack→avionics"),
         "TCS>MOB": (1.0 - lim_tcs, "thermal speed limit"),
         "EPS>GNC": (clamp(2.0 * (1.0 - brown), 0, 1), f"bus {v_bus:.1f} V brownout"),
         "EPS>COMMS": (clamp(brown_db / 6.0, 0, 1), f"-{brown_db:.1f} dB low bus voltage"),

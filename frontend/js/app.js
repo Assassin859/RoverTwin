@@ -5,21 +5,22 @@ import { Guide } from "./guide.js";
 import { EDGE_EQ } from "./edges.js";
 
 const $ = (id) => document.getElementById(id);
-export const S = { meta: null, snap: null, history: [], events: [], pred: null, truth: false, preview: null, connected: false, allPlans: false, pauseOnCritical: true, highlightEdges: null, llmKey: "" };
+export const S = { meta: null, snap: null, history: [], events: [], pred: null, truth: false, preview: null, connected: false, allPlans: false, pauseOnCritical: true, highlightEdges: null, llmKey: "", autoHiDone: false };
 export const bus = new EventTarget();
 const emit = (type, detail) => bus.dispatchEvent(new CustomEvent(type, { detail }));
 let lastAnoms = "";
 let pausedCritKey = null;
 let llmTimer = null;
 let llmBusy = false;
+let llmPending = false;
 const SUBS_ORDER = ["EPS", "TCS", "GNC", "COMMS", "MOB", "DATA"];
 const MATRIX_LABEL = { EPS: "P", TCS: "T", GNC: "G", COMMS: "C", MOB: "M", DATA: "D" };
 
 const ICON = { battery: "🔋", thermal: "🌡️", sensor: "🧭", comms: "📡" };
 const SHORT_FAULT = { battery: "Battery", thermal: "Overheat", sensor: "Sensor", comms: "Radio" };
 const SUB_NAME = { EPS: "POWER", TCS: "THERMAL", GNC: "NAV", COMMS: "COMMS", MOB: "MOBILITY", DATA: "DATA" };
-const TICKER_KINDS = new Set(["FAULT", "FDIR", "TWIN", "DIAG", "PRED", "SYNC"]);
-const KIND_NAME = { FAULT: "FAULT", FDIR: "ROVER", TWIN: "TWIN", DIAG: "DIAG", PRED: "PRED", CMD: "CMD", SYNC: "LINK", SYS: "SYS" };
+const TICKER_KINDS = new Set(["FAULT", "FDIR", "TWIN", "DIAG", "PRED", "SYNC", "CASCADE"]);
+const KIND_NAME = { FAULT: "FAULT", FDIR: "ROVER", TWIN: "TWIN", DIAG: "DIAG", PRED: "PRED", CMD: "CMD", SYNC: "LINK", SYS: "SYS", CASCADE: "CHAIN" };
 
 // ------------------------------------------------------------------ helpers
 export const fmtMET = (t) => {
@@ -56,7 +57,7 @@ function setConn(on) {
   const c = $("conn");
   if (c) {
     c.classList.toggle("off", !on);
-    c.innerHTML = `Ground segment: <b>${on ? "connected" : "offline — start the server (see README)"}</b>`;
+    c.innerHTML = `Ground segment: <b>${on ? "connected" : "offline — run uvicorn locally for the live twin (Vercel hosts UI only)"}</b>`;
   }
   applyGroundGate();
   if (!on && $("syncPill")) {
@@ -104,6 +105,11 @@ function onSnap(snap) {
   for (const e of snap.events || []) {
     S.events.push(e);
     addLog(e);
+    if (e.kind === "CASCADE") {
+      const chain = snap.cascade_chain?.stages || [];
+      const st = chain.find((x) => x.text === e.text) || chain[chain.length - 1];
+      if (st?.edges?.length) cascade.pulseEdges(st.edges);
+    }
     emit("event", e);
   }
   render();
@@ -279,11 +285,22 @@ function render() {
   if (!anoms.size) lastAnoms = "";
 
   const corr = sn.correlations || { matrix: {}, paths: [], active: [] };
+  // Auto-highlight longest strong path once when findings appear
+  if ((sn.findings || []).length && (corr.paths || []).length && !S.highlightEdges && !S.autoHiDone) {
+    const top = [...corr.paths].sort((a, b) => (b.edges?.length || 0) - (a.edges?.length || 0)
+      || (b.strength || 0) - (a.strength || 0))[0];
+    if (top?.edges?.length) {
+      S.highlightEdges = top.edges;
+      S.autoHiDone = true;
+    }
+  }
+  if (!(sn.findings || []).length) S.autoHiDone = false;
   const hi = S.highlightEdges || corr.active;
   cascade.setHighlight(S.highlightEdges);
   cascade.update(sn.couplings, sn.subsystems, corr.active);
+  renderChain(sn.cascade_chain || { stages: [] });
   renderCorrTable(corr, hi);
-  renderCorrMatrix(corr.matrix, hi);
+  renderCorrMatrix(corr.matrix, hi, corr.paths);
   scheduleExplain(sn, corr);
 
   // view chips
@@ -330,8 +347,28 @@ function estimatesTable(est, tru, cfg) {
     <div class="note">Truth is hidden from the twin: it only sees telemetry. ${cfg.bat_isolated ? "Battery parameters frozen while string 2 is isolated." : ""}</div>`;
 }
 
+function renderChain(chain) {
+  const stages = chain.stages || [];
+  const box = $("chainReaction");
+  if (!box) return;
+  if (!stages.length) {
+    patch(box, `<div class="ch-h">CHAIN REACTION</div><div class="ch-empty">Waiting for a root fault — losses will stack here in order.</div>`);
+    return;
+  }
+  const hi = new Set(S.highlightEdges || []);
+  const latest = stages[stages.length - 1]?.id;
+  const rows = stages.map((st) => {
+    const edges = st.edges || [];
+    const on = edges.length && edges.every((e) => hi.has(e));
+    return `<li data-edges="${esc(edges.join("|"))}" data-id="${esc(st.id)}" class="${on ? "on" : ""}${st.id === latest ? " pulse" : ""}">
+      <span class="ch-n">${st.n || ""}.</span><span class="ch-k">${esc(st.kind)}</span>${esc(st.text)}</li>`;
+  }).join("");
+  patch(box, `<div class="ch-h">CHAIN REACTION <small>${stages.length} stage${stages.length === 1 ? "" : "s"}</small></div><ol>${rows}</ol>`);
+}
+
 function renderCorrTable(corr, hi) {
-  const paths = corr.paths || [];
+  const paths = [...(corr.paths || [])].sort((a, b) => (b.edges?.length || 0) - (a.edges?.length || 0)
+    || (b.strength || 0) - (a.strength || 0));
   const hiSet = new Set(hi || []);
   if (!paths.length) {
     patch($("corrTable"), `<div class="note">No active root-cause paths. Inject a fault to light cause→effect correlations.</div>`);
@@ -339,24 +376,27 @@ function renderCorrTable(corr, hi) {
   }
   const rows = paths.slice(0, 8).map((p) => {
     const edges = p.edges || [];
+    const hops = edges.length;
     const chain = [p.from, ...(p.via || []), p.to].map((x) => SUB_NAME[x] || x).join(" → ");
     const on = edges.length && edges.every((e) => hiSet.has(e));
     const eq = EDGE_EQ[edges[edges.length - 1]] || "";
     return `<tr data-edges="${esc(edges.join("|"))}" class="${on ? "on" : ""}">
       <td>${esc(SUB_NAME[p.from] || p.from)}</td>
       <td>${esc(chain)}</td>
+      <td class="str">${hops}</td>
       <td class="str">${p.strength.toFixed(2)}</td>
       <td class="eq" title="${esc(eq)}">${esc(p.label)}</td></tr>`;
   }).join("");
-  patch($("corrTable"), `<table><thead><tr><th>Root</th><th>Path</th><th>Str</th><th>Effect</th></tr></thead><tbody>${rows}</tbody></table>`);
+  patch($("corrTable"), `<table><thead><tr><th>Root</th><th>Path</th><th>Hops</th><th>Str</th><th>Effect</th></tr></thead><tbody>${rows}</tbody></table>`);
 }
 
-function renderCorrMatrix(matrix, hi) {
+function renderCorrMatrix(matrix, hi, paths) {
   const hiSet = new Set(hi || []);
   if (!matrix || !Object.keys(matrix).length) {
     patch($("corrMatrix"), "");
     return;
   }
+  const legend = `<div class="mx-leg">P=Power · T=Thermal · G=GNC/ADCS · C=Comms · M=Mobility · D=Data</div>`;
   const cells = [`<div class="mh"></div>` + SUBS_ORDER.map((b) => `<div class="mh">${MATRIX_LABEL[b]}</div>`).join("")];
   for (const a of SUBS_ORDER) {
     cells.push(`<div class="mh">${MATRIX_LABEL[a]}</div>`);
@@ -366,10 +406,12 @@ function renderCorrMatrix(matrix, hi) {
       const hot = s >= 0.12;
       const alpha = Math.min(1, s);
       const bg = hot ? `rgba(255,153,51,${0.15 + 0.75 * alpha})` : "rgba(255,255,255,.04)";
-      cells.push(`<div class="cell${hiSet.has(key) ? " on" : ""}${hot ? " hot" : ""}" data-edge="${key}" style="background:${bg}" title="${key} · ${s.toFixed(2)}">${hot ? s.toFixed(1) : ""}</div>`);
+      const eq = EDGE_EQ[key] || "";
+      cells.push(`<div class="cell${hiSet.has(key) ? " on" : ""}${hot ? " hot" : ""}" data-edge="${key}" style="background:${bg}" title="${esc(key)} · ${s.toFixed(2)}${eq ? " — " + esc(eq) : ""}">${hot ? s.toFixed(1) : ""}</div>`);
     }
   }
-  patch($("corrMatrix"), `<div style="display:grid;grid-template-columns:18px repeat(6,1fr);gap:1px">${cells.join("")}</div>`);
+  patch($("corrMatrix"), `${legend}<div style="display:grid;grid-template-columns:18px repeat(6,1fr);gap:1px">${cells.join("")}</div>`);
+  $("corrMatrix")._paths = paths || [];
 }
 
 function scheduleExplain(sn, corr) {
@@ -380,12 +422,17 @@ function scheduleExplain(sn, corr) {
   if (key === S.llmKey) return;
   S.llmKey = key;
   clearTimeout(llmTimer);
-  llmTimer = setTimeout(() => fetchExplain(false), 2500);
+  const delay = (corr.active || []).length ? 800 : 2500;
+  llmTimer = setTimeout(() => fetchExplain(false), delay);
 }
 
 async function fetchExplain(manual) {
-  if (llmBusy) return;
+  if (llmBusy) {
+    llmPending = true;
+    return;
+  }
   llmBusy = true;
+  llmPending = false;
   const note = $("llmNote");
   if (note) {
     note.classList.add("busy");
@@ -399,14 +446,26 @@ async function fetchExplain(manual) {
       note.textContent = j.text || "No explanation.";
     }
     const badge = $("llmBadge");
-    if (badge) badge.textContent = j.ok ? `local ${j.model}` : (j.text?.startsWith("Ollama") ? "Ollama offline" : `local ${j.model || "llm"} (fallback)`);
+    if (badge) {
+      if (j.ok) badge.textContent = `local ${j.model}`;
+      else if (j.source === "template") badge.textContent = `template note · ${j.model || "offline"}`;
+      else badge.textContent = j.text?.startsWith("Ollama") ? "Ollama offline" : `local ${j.model || "llm"} (fallback)`;
+    }
+    if (!j.ok) refreshLlmStatus();
+    // Coach cue for guided demo
+    document.dispatchEvent(new CustomEvent("llm-note", { detail: { text: j.text, ok: j.ok, source: j.source } }));
   } catch {
     if (note) {
       note.classList.remove("busy");
       note.textContent = "Could not reach /api/llm/explain — twin correlations still work without the LLM.";
     }
+    refreshLlmStatus();
   } finally {
     llmBusy = false;
+    if (llmPending) {
+      llmPending = false;
+      fetchExplain(false);
+    }
   }
 }
 
@@ -415,10 +474,10 @@ async function refreshLlmStatus() {
     const j = await (await fetch("/api/llm/status")).json();
     const badge = $("llmBadge");
     if (!badge) return;
-    badge.textContent = j.ok && j.model_ready ? `Ollama ready · ${j.model}` : j.ok ? `Ollama up · pull ${j.model}` : "Ollama offline — correlations still work";
+    badge.textContent = j.ok && j.model_ready ? `Ollama ready · ${j.model}` : j.ok ? `Ollama up · pull ${j.model}` : "Ollama offline — template note still works";
   } catch {
     const badge = $("llmBadge");
-    if (badge) badge.textContent = "Ollama offline — correlations still work";
+    if (badge) badge.textContent = "Ollama offline — template note still works";
   }
 }
 
@@ -507,7 +566,7 @@ $("goConsole").onclick = showConsole;
 $("goGuide").onclick = () => { showConsole(); guide.start(); };
 $("home").onclick = showLanding;
 $("guideBtn").onclick = () => guide.start();
-$("resetBtn").onclick = () => { pausedCritKey = null; S.llmKey = ""; S.highlightEdges = null; send("reset"); };
+$("resetBtn").onclick = () => { pausedCritKey = null; S.llmKey = ""; S.highlightEdges = null; S.autoHiDone = false; send("reset"); };
 $("truth").onchange = (e) => { S.truth = e.target.checked; render(); };
 $("pauseCrit").onchange = (e) => { S.pauseOnCritical = e.target.checked; if (!e.target.checked) pausedCritKey = null; };
 $("explainBtn").onclick = () => { S.llmKey = ""; fetchExplain(true); };
@@ -518,11 +577,25 @@ $("corrTable").addEventListener("click", (e) => {
   S.highlightEdges = S.highlightEdges && edges.join() === S.highlightEdges.join() ? null : edges;
   render();
 });
+$("chainReaction").addEventListener("click", (e) => {
+  const li = e.target.closest("li[data-edges]");
+  if (!li) return;
+  const edges = (li.dataset.edges || "").split("|").filter(Boolean);
+  if (!edges.length) return;
+  S.highlightEdges = S.highlightEdges && edges.join() === S.highlightEdges.join() ? null : edges;
+  cascade.pulseEdges(edges);
+  render();
+});
 $("corrMatrix").addEventListener("click", (e) => {
   const c = e.target.closest("[data-edge]");
   if (!c) return;
   const key = c.dataset.edge;
-  S.highlightEdges = S.highlightEdges && S.highlightEdges[0] === key && S.highlightEdges.length === 1 ? null : [key];
+  const paths = $("corrMatrix")._paths || S.snap?.correlations?.paths || [];
+  const hit = [...paths]
+    .filter((p) => (p.edges || []).includes(key))
+    .sort((a, b) => (b.strength || 0) - (a.strength || 0) || (b.edges?.length || 0) - (a.edges?.length || 0))[0];
+  const edges = hit?.edges || [key];
+  S.highlightEdges = S.highlightEdges && edges.join() === S.highlightEdges.join() ? null : edges;
   render();
 });
 $("speed").onclick = (e) => {
@@ -535,4 +608,5 @@ $("speed").onclick = (e) => {
 const guide = new Guide({ S, bus, send, showConsole });
 addEventListener("resize", drawCharts);
 refreshLlmStatus();
+setInterval(refreshLlmStatus, 30000);
 connect();

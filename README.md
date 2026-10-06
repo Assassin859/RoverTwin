@@ -149,6 +149,14 @@ uvicorn backend.app:app --port 8000
 
 Open <http://localhost:8000>. If port 8000 is taken, use `--port 8765`. Interactive API docs are at `/docs`.
 
+### Static UI on Vercel
+
+The `frontend/` folder can be hosted on Vercel for landing / walkthrough visuals. The live twin (WebSocket + FastAPI) does **not** run on Vercel — start `uvicorn` locally for inject / cascade / predict.
+
+```bash
+npx vercel --prod
+```
+
 ```bash
 python -m pytest -q
 ```
@@ -184,12 +192,14 @@ python scripts/build_pptx.py
 
 ## Demo script (3 minutes)
 
-1. **Landing page → Guided demo.** It resets the mission and explains the twin in plain language.
-2. **Pick a fault** (battery is the clearest). Watch the residual bar spike, the diagnosis appear within about 2 sim-minutes, the lit multi-hop path on HOW IT SPREADS, the cause→effect table / 6×6 matrix, and (if Ollama is up) the OPERATOR NOTE.
-3. **Prediction.** The sim pauses on "If nothing is done: battery above 50°C in N min", with the bands on the charts.
-4. **Decide.** Hover the plan cards to preview them in green on the charts, then pick one. The command travels over the uplink and the rover confirms it.
-5. **Mission report.** It shows what happened, what the twin did, why it matters and how to minimise it.
-6. Switch on **Truth (test harness)** in the console to show the hidden true state as a cyan ghost and dotted lines, and the estimated vs true parameters.
+**Spoken (judges):** “Six coupled subsystems — EPS, TCS, GNC≈ADCS, COMMS. Twin ≠ dashboard: same physics, frames only. Watch the lit edge — that is an equation.”
+
+1. **Landing → 3-min judge path.** Resets the mission; intro says ground ↔ relay ↔ rover and twin ≠ dashboard **before** any fault.
+2. **RUN BATTERY DEMO** (or pick Battery). Residual bar spikes; diagnosis; lit multi-hop on HOW IT SPREADS (table + 6×6 matrix); OPERATOR NOTE narrates twin facts.
+3. **Prediction.** Pauses on first critical (e.g. battery above 50°C); ensemble bands on charts.
+4. **Decide.** Hover plans to preview; execute top plan — uplink through the relay.
+5. **Mission report.** What happened / what the twin did / FDIR before uplink / how to minimise.
+6. **Truth (test harness)** — optional fidelity check only; not what operators trust day-to-day.
 
 ## Answers to the judges' questions
 

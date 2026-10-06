@@ -4,16 +4,16 @@ import { EDGE_STORY } from "./edges.js";
 
 const STORY = {
   battery: {
-    icon: "🔋", name: "Battery degradation", severity: 0.85,
-    analogy: "Like an old phone battery that drains fast and gets warm in your pocket.",
-    why: "The battery is the rover's heart. No power means no mission, and an overheating battery can be lost for good.",
+    icon: "🔋", name: "Battery degradation", severity: 0.85, judge: true,
+    analogy: "Internal short → pack heat → avionics → gyro (EPS→TCS→GNC).",
+    why: "The battery is the spacecraft power bus. No power means no mission, and an overheating pack can be lost for good.",
     fix: ["Track battery health from telemetry trends, not just the charge level",
       "Build the battery from separate strings so a bad one can be isolated",
       "Keep reserve power and plan rest stops in sunlight"],
   },
   thermal: {
     icon: "🌡️", name: "Thermal stress", severity: 1.0,
-    analogy: "Like a laptop left in the sun: it overheats and starts misbehaving.",
+    analogy: "Radiator loss → avionics heat → sensors and radio derate.",
     why: "The lunar surface swings from about +120°C to -170°C. Temperature control keeps every part working.",
     fix: ["Protect radiators from dust and monitor their efficiency from telemetry",
       "Schedule heavy work for cooler periods",
@@ -21,7 +21,7 @@ const STORY = {
   },
   sensor: {
     icon: "🧭", name: "Sensor failure", severity: 0.9,
-    analogy: "Like a compass that slowly drifts: you think you face north, but you don't.",
+    analogy: "Gyro bias → attitude error → antenna miss (GNC→COMMS).",
     why: "Sensors give the rover its sense of direction, and the antenna needs that to find the orbiter.",
     fix: ["Fly a backup sensor for every critical job",
       "Cross-check sensors against each other (gyro against sun sensor)",
@@ -29,7 +29,7 @@ const STORY = {
   },
   comms: {
     icon: "📡", name: "Communication loss", severity: 0.8,
-    analogy: "Like a phone call that drops in a tunnel: you can't talk or hear.",
+    analogy: "Transponder loss → blind twin → search power drain.",
     why: "The radio is the only bridge between Earth and the rover. Without it, even a healthy rover is useless to Earth.",
     fix: ["Carry a spare transponder and a low-gain antenna that needs no pointing",
       "Give the rover an onboard comm-loss timer and a stored safe plan",
@@ -38,9 +38,9 @@ const STORY = {
 };
 
 const COMMON = [
-  "Faults chain together: one weak part pulls the others down, like falling dominoes.",
+  "Faults chain through live model edges (EPS/TCS/GNC·ADCS/COMMS) — knock-ons are correlated, not separate gauges.",
+  "Mission control ranks recovery with a 2 h forward simulation before uplink — FDIR with a twin, not guesswork.",
   "Testing on a twin costs nothing. A failure on the Moon can cost crores and years of work.",
-  "Spotting problems early gives engineers time to act before a limit is crossed.",
 ];
 
 const $ = (id) => document.getElementById(id);
@@ -55,6 +55,9 @@ export class Guide {
     this.active = false;
     this.coach = $("coach");
     this.report = $("report");
+    this.pathCue = "";
+    this.llmCue = false;
+    this.seenChain = new Set();
     bus.addEventListener("snap", (e) => this.active && this.onSnap(e.detail));
     bus.addEventListener("event", (e) => this.active && this.onEvent(e.detail));
     bus.addEventListener("hello", () => this.active && this.onHello());
@@ -64,6 +67,11 @@ export class Guide {
       this.S.preview = c ? c.dataset.plan : this.S.preview;
     });
     this.report.addEventListener("click", (e) => this.onClick(e));
+    document.addEventListener("llm-note", (e) => {
+      if (!this.active || this.step !== "cascade" || this.llmCue || !e.detail?.text) return;
+      this.llmCue = true;
+      this.say("OPERATOR NOTE updated — same twin facts, plain language (local LLM or template).", "twin");
+    });
   }
 
   start() {
@@ -87,6 +95,9 @@ export class Guide {
     this.kind = null;
     this.narr = [];
     this.seenEdges = new Set();
+    this.pathCue = "";
+    this.llmCue = false;
+    this.seenChain = new Set();
     this.m = {};
   }
 
@@ -119,23 +130,27 @@ export class Guide {
     if (step === "intro") {
       this.spot(["subsPanel"]);
       this.render(`<div class="step"><span>1 / 6 · MIRROR</span></div>
-        <h2>A live twin, not a dashboard</h2>
-        <p>Telemetry arrives ~2.6 s late from a simulated lunar rover. Health tiles and charts are the twin's estimate — corrected by every frame.</p>
+        <h2>Satellite-ops twin — not a dashboard</h2>
+        <p>Ground segment ↔ relay orbiter ↔ lunar rover. Six coupled subsystems (EPS / TCS / GNC·ADCS / COMMS / MOB / DATA). A dashboard replays canned curves; this twin runs the <b>same physics</b> and only ingests delayed frames — it never reads the plant.</p>
         <div class="row"><button class="cta" data-a="next">NEXT</button></div>`);
     } else if (step === "sync") {
       this.spot(["syncPill", "chartsPanel"]);
       this.render(`<div class="step"><span>2 / 6 · SYNC</span></div>
-        <h2>Same physics, locked to the radio</h2>
-        <p>White dots = telemetry. Saffron = twin. The top pill shows SYNCED / LOW RATE / BLIND. While blind, the twin keeps predicting alone.</p>
+        <h2>Telemetry-locked, lossy link</h2>
+        <p>~2.6 s latency, rate-limited and lossy. Pill shows SYNCED / LOW RATE / BLIND. While blind the twin keeps predicting alone, then re-locks when frames return.</p>
         <div class="row"><button class="cta" data-a="next">NEXT</button></div>`);
     } else if (step === "pick") {
       this.reset();
       this.spot(["faultPanel"]);
+      const order = ["battery", "thermal", "sensor", "comms"];
       this.render(`<div class="step"><span>3 / 6 · BREAK</span></div>
         <h2>Inject a fault</h2>
-        <p>Break the rover on purpose. Watch the twin diagnose and forecast.</p>
-        <div class="cards">${Object.entries(STORY).map(([k, s]) => `
-          <button class="card" data-fault="${k}"><span class="ic">${s.icon}</span><b>${s.name}</b><span>${s.analogy}</span></button>`).join("")}</div>`);
+        <p>Battery is the clearest judge path (EPS→TCS→GNC heat cascade). Or pick another fault.</p>
+        <div class="row" style="justify-content:stretch;margin-bottom:8px"><button class="cta" data-a="batdemo" style="width:100%">RUN BATTERY DEMO</button></div>
+        <div class="cards">${order.map((k) => {
+          const s = STORY[k];
+          return `<button class="card${s.judge ? " best" : ""}" data-fault="${k}">${s.judge ? `<span class="badge">Best for judges</span>` : ""}<span class="ic">${s.icon}</span><b>${s.name}</b><span>${s.analogy}</span></button>`;
+        }).join("")}</div>`);
     } else if (step === "cascade") {
       this.spot(["cascadePanel", "diagPanel", "notePanel"]);
       this.renderCascade();
@@ -175,18 +190,16 @@ export class Guide {
   renderCascade() {
     const ready = this.readyAt != null;
     const corr = this.S.snap?.correlations;
-    const pathLine = (corr?.paths || []).length
-      ? `Follow the lit path: ${(corr.paths[0].edges || []).join(" → ")} (cause → next → next…).`
-      : "Follow the lit path: cause → next → next… when edges light up.";
-    const llm = document.getElementById("llmBadge")?.textContent || "";
-    const llmLine = llm.includes("ready") || llm.includes("local qwen")
-      ? " OPERATOR NOTE (local LLM) narrates the same twin facts — it does not invent physics."
-      : "";
+    const paths = corr?.paths || [];
+    const top = [...paths].sort((a, b) => (b.edges?.length || 0) - (a.edges?.length || 0))[0];
+    const pathLine = top
+      ? `Follow the chain reaction: ${(top.edges || []).join(" → ")} — timed losses stack in CHAIN REACTION as each knock-on fires.`
+      : "Follow the chain reaction: root → lit edges → capability/FDIR losses appear in order under HOW IT SPREADS.";
     this.render(`<div class="step"><span>4 / 6 · CASCADE</span><span>${STORY[this.kind].icon} ${STORY[this.kind].name}</span></div>
       <h2>Watch the fault spread</h2>
-      <p>${pathLine} Table + 6×6 matrix list every live correlation; each edge is an equation.${llmLine}</p>
+      <p>${pathLine}</p>
       <ul class="narr">${this.narr.slice(-6).map((n) => `<li class="${n.c}">${esc(n.t)}</li>`).join("") || "<li>Fault injected. Waiting for the effects to show up…</li>"}</ul>
-      <div class="row">${ready ? `<button class="cta" data-a="next">SEE THE PREDICTION</button>` : `<span class="note">Running at 60× speed…</span>`}</div>`);
+      <div class="row">${ready ? `<button class="cta" data-a="next">SEE THE PREDICTION</button>` : `<span class="note">Running at 60× — waiting for diagnosis + lit path…</span>`}</div>`);
   }
 
   renderOutcome() {
@@ -211,7 +224,8 @@ export class Guide {
     } else if (e.kind === "DIAG") {
       this.m.tDiag ??= e.t;
       this.m.diag ??= e.text;
-      this.say("The twin's diagnosis: " + e.text.replace("Diagnosis: ", "").replace(/ \(confidence.*\)$/, "") + ".", "twin");
+      const body = e.text.replace("Diagnosis: ", "").replace(/ \(confidence.*\)$/, "");
+      this.say("Root finding (twin): " + body + ". Knock-ons show on HOW IT SPREADS via model edges.", "twin");
     } else if (e.kind === "FDIR") {
       if (e.text.startsWith("Executed command")) this.say("Rover confirms: " + e.text.replace(/^Executed command #\d+: /, ""), "twin");
       else this.say("The rover protected itself: " + e.text, "bad");
@@ -227,21 +241,40 @@ export class Guide {
 
   onSnap(sn) {
     if (this.step === "cascade") {
-      for (const [k, [s]] of Object.entries(sn.couplings)) {
+      for (const [k, [s]] of Object.entries(sn.couplings || {})) {
         if (s >= 0.25 && !this.seenEdges.has(k) && EDGE_STORY[k]) {
           this.seenEdges.add(k);
           this.say(EDGE_STORY[k]);
         }
       }
+      const corr = sn.correlations || {};
+      const multi = (corr.paths || []).find((p) => (p.edges || []).length >= 2);
+      if (multi && this.pathCue !== multi.edges.join(">")) {
+        this.pathCue = multi.edges.join(">");
+        this.say(`Lit multi-hop path: ${multi.edges.join(" → ")}.`, "twin");
+      }
+      for (const st of (sn.cascade_chain?.stages || [])) {
+        if (this.seenChain.has(st.id)) continue;
+        this.seenChain.add(st.id);
+        this.say(`Loss ${st.n}: ${st.text}`, st.kind === "root" ? "bad" : "twin");
+      }
       const p = this.S.pred;
       const since = sn.t - this.m.tInject;
       const understood = this.m.tDiag != null || this.m.tLost != null;
+      const active = corr.active || [];
+      const pathLit = this.kind === "battery"
+        ? active.includes("EPS>TCS")
+        : active.length > 0 || this.seenEdges.size > 0;
+      const chainReady = (sn.cascade_chain?.stages || []).some((s) => s.kind === "root")
+        && (sn.cascade_chain?.stages || []).some((s) => s.kind === "edge" || s.kind === "path");
       const actionable = p && p.t0 > this.m.tInject + 60 && (p.first_critical || p.plans[0].id !== "continue");
-      if (this.readyAt == null && ((understood && actionable && since > 600) || since > 1800)) {
+      const fastReady = this.kind === "battery" && understood && (pathLit || chainReady) && since > 180;
+      const fullReady = understood && actionable && since > 600;
+      if (this.readyAt == null && (fastReady || fullReady || since > 1200)) {
         this.readyAt = performance.now();
         this.renderCascade();
       }
-      if (this.readyAt != null && performance.now() - this.readyAt > 12000) this.go("predict");
+      if (this.readyAt != null && performance.now() - this.readyAt > 10000) this.go("predict");
     } else if (this.step === "outcome") {
       const tr = sn.truth;
       const m = this.m;
@@ -271,6 +304,14 @@ export class Guide {
       return;
     }
     if (a === "report") return this.showReport();
+    if (a === "batdemo") {
+      this.kind = "battery";
+      this.m.tInject = this.S.snap.t;
+      this.send("inject", { kind: "battery", severity: STORY.battery.severity, ramp: 60 });
+      this.send("speed", { value: 60 });
+      this.send("pause", { value: false });
+      return this.go("cascade");
+    }
     if (a === "next") {
       const order = ["intro", "sync", "pick", "cascade", "predict", "decide"];
       return this.go(order[order.indexOf(this.step) + 1]);

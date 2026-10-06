@@ -13,6 +13,11 @@ def test_battery_correlation_paths_include_eps_tcs():
     assert any("EPS>TCS" in edges for edges in edge_sets)
     assert "EPS>TCS" in corr["active"]
     assert any(p["from"] == "EPS" for p in corr["paths"])
+    # Multi-hop via conduction into avionics (EPS→TCS→GNC) should appear for battery demos
+    multi = [p for p in corr["paths"] if len(p["edges"]) >= 2]
+    assert multi or "TCS>GNC" in corr["active"]
+    if multi:
+        assert any("EPS>TCS" in p["edges"] and "TCS>GNC" in p["edges"] for p in multi)
 
 
 def test_snapshot_exposes_correlations():
