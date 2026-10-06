@@ -3,7 +3,7 @@
 import { edgeLabel, edgeTooltip } from "./edges.js";
 
 const NODES = {
-  EPS: [80, 52, "POWER"], TCS: [260, 30, "THERMAL"], COMMS: [440, 52, "COMMS"],
+  EPS: [80, 52, "EPS"], TCS: [260, 30, "TCS"], COMMS: [440, 52, "COMMS"],
   GNC: [260, 112, "ADCS"], MOB: [80, 165, "PAYLOAD"], DATA: [440, 165, "OBDH"],
 };
 const STATUS_COLOR = { NOMINAL: "#3ecf6a", WATCH: "#ffb02e", WARNING: "#ff7a3d", CRITICAL: "#ff4d3a" };
@@ -29,6 +29,7 @@ export class Cascade {
     }
     this.gEdges = el("g", {}, svg);
     this.gLabels = el("g", {}, svg);
+    this.gHops = el("g", {}, svg);
     this.gNodes = el("g", {}, svg);
     for (const [id, [x, y, label]] of Object.entries(NODES)) {
       const g = el("g", { class: "node", transform: `translate(${x},${y})` }, this.gNodes);
@@ -100,15 +101,25 @@ export class Cascade {
       const show = s >= 0.2 || onPath;
       e.lg.style.display = show ? "" : "none";
       e.lg.style.opacity = hasFocus && !onPath ? "0.25" : "1";
-      const onText = edgeLabel(key, label);
+      // Full equation why-text stays on hover title only on the main screen
+      const onText = onPath ? edgeLabel(key, label) : (s >= 0.35 ? edgeLabel(key, label) : "");
       if (show && e.tx.textContent !== onText) {
         e.tx.textContent = onText;
-        const w = Math.min(220, e.tx.getComputedTextLength() + 8);
+        const w = Math.min(180, Math.max(24, e.tx.getComputedTextLength() + 8));
         e.bg.setAttribute("width", w);
         e.bg.setAttribute("x", e.cx - w / 2);
         e.bg.setAttribute("y", e.cy - 7);
       }
     }
+    // Hop numbers along highlighted path
+    while (this.gHops.firstChild) this.gHops.removeChild(this.gHops.firstChild);
+    const ordered = [...hi];
+    ordered.forEach((key, i) => {
+      const e = this.edges[key];
+      if (!e) return;
+      const t = el("text", { class: "hop-num", x: e.cx, y: e.cy - 12, "text-anchor": "middle" }, this.gHops);
+      t.textContent = String(i + 1);
+    });
     for (const sub of subsystems || []) {
       const n = this.nodes[sub.id];
       if (!n) continue;

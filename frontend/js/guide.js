@@ -178,7 +178,7 @@ export class Guide {
         <div class="row"><button class="cta" data-a="next">NEXT</button><span class="note">auto in 6 s</span></div>`);
       this._later(6000, () => this.step === "intro" && this.go("sync"));
     } else if (step === "sync") {
-      this.spot(["syncPill", "orbitStrip", "chartsPanel"]);
+      this.spot(["statusPill", "orbitStrip", "cascadePanel"]);
       this.render(`<div class="step"><span>2 / 6 · SYNC</span></div>
         <h2>Pass-gated telemetry</h2>
         <p>Downlink only during AOS. Pill shows SYNCED / LOW RATE / BLIND. Twin never reads the plant.</p>
@@ -209,17 +209,17 @@ export class Guide {
         }
       });
     } else if (step === "cascade") {
-      this.spot(["cascadePanel", "diagPanel", "notePanel"]);
+      this.spot(["cascadePanel", "leftCol"]);
       this.renderCascade();
     } else if (step === "predict") {
       if (!S.replay) this.send("pause", { value: true });
-      this.spot(["impactPanel"]);
+      this.spot(["cascadePanel", "storyLine"]);
       const p = S.pred, cont = p?.plans?.find((x) => x.id === "continue");
       const fc = p?.first_critical;
       const evs = (p?.events || []).slice(0, 3);
       this.render(`<div class="step"><span>5 / 6 · PREDICT</span></div>
         <h2>${fc ? `If nothing is done: ${esc(lc(fc.text))} in ${dur(fc.t)}` : `If nothing is done: ${esc(cont?.notes?.join(", ") || "limits held")}`}</h2>
-        <p>Ensemble forecast over 2 h — dashed lines and bands on the charts.</p>
+        <p>Look at the story line under the cascade — diagnosis, next risk, recommended fix. Charts live in MORE if you need them.</p>
         <ul class="narr">${evs.map((e) => `<li class="${e.level === "crit" ? "bad" : ""}">In ${dur(e.t)}: ${esc(e.text)}</li>`).join("") || "<li>No hard limits crossed.</li>"}</ul>
         <div class="row"><button class="cta" data-a="next">WHAT CAN WE DO?</button><span class="note">auto in 5 s</span></div>`);
       this._later(5000, () => this.step === "predict" && this.go("decide"));
@@ -249,7 +249,7 @@ export class Guide {
         this._choosePlan(best.id);
       });
     } else if (step === "outcome") {
-      this.spot(["impactPanel", "chartsPanel"]);
+      this.spot(["plansPanel", "cascadePanel"]);
       this.renderOutcome();
       // Hands-free: report within wall budget (~2.5 min from start, or 25 s after decide)
       const elapsed = performance.now() - this._wall0;

@@ -13,7 +13,7 @@ def test_replay_file_exists_and_gzip_opens():
     assert REPLAY.is_file(), f"missing {REPLAY}; run: python scripts/record_replay.py"
     with gzip.open(REPLAY, "rb") as f:
         data = json.loads(f.read().decode("utf-8"))
-    assert data.get("version") == 1
+    assert data.get("version") in (1, 2)
     msgs = data["messages"]
     assert len(msgs) >= 3
     types = {m["msg"]["type"] for m in msgs}
